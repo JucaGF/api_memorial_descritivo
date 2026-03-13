@@ -1,0 +1,58 @@
+{
+  "documento": {
+    "data_atual": "09 de janeiro de 2026"
+  },
+  "obra": {
+    "numero_cadastro": "12345/2026",
+    "construtora": "MGA Construções e Incorporações LTDA",
+    "nome": "Edifício Makai",
+    "localizacao": "Avenida Max Zagel, S/N, Lote 05-A Quadra 12, Cabedelo - PB",
+    "tipo_edificacao": "Residencial Multifamiliar",
+    "tipologia": "Subsolo, Térreo, 7 Pav. tipos, Cobertura e Coberta",
+    "qtd_apartamentos": 30,
+    "qtd_lojas": 0,
+    "qtd_restaurantes": 0,
+    "porcentagem_entre_trafos": "1%",
+    "porcentagem_entre_quadros": "2%"
+  },
+  "energia": {
+    "tem_subestacao": true,
+    "tipo_subestacao": "subestação abrigada abaixadora",
+    "potencia_transformador_kva": 750,
+    "tap_descricao": "Tap 2 - 13.200 V",
+    "tensao_secundaria": "380 V entre fases e 220 V entre fase e neutro"
+  },
+  "mt": {
+    "tensao_kv": 15,
+    "diametro_eletroduto_pol": 4,
+    "tipo_cabo": "EPR/XLPE",
+    "temperatura_cabo": 90,
+    "classe_isolacao": "8,7/15",
+    "secao_cabo_mm2": 35
+  },
+  "aterramento": {
+    "qtd_hastes": 7,
+    "secao_cabo_cobre_mm2": 50,
+    "tipo_sistema": "TN-S",
+    "secao_cabo_malha_mm2": 50,
+    "local_bep": "subsolo"
+  },
+  "gerador": {
+    "qtd": 2,
+    "potencia_kva": 550,
+    "tipo_atendimento": "condominio",
+    "circuitos_atendidos": null
+  },
+  "nao_inclusos": {
+    "tem_itens": true,
+    "cpct": false,
+    "cftv": true,
+    "alarme_patrimonial": true,
+    "sonorizacao": false,
+    "alarme_incendio": true,
+    "automacao": false
+  },
+  "instalacao": {
+    "perfilado_tipo": "perfilado perfurado galvanizado a fogo"
+  }
+}

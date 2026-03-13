@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MemorialEletricoContextV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "documento",
+    "obra",
+    "energia",
+    "mt",
+    "aterramento",
+    "gerador",
+    "nao_inclusos",
+    "instalacao"
+  ],
+  "properties": {
+    "documento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_atual"],
+      "properties": {
+        "data_atual": {
+          "type": "string",
+          "description": "Data exibida na capa do memorial"
+        }
+      }
+    },
+    "obra": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "numero_cadastro",
+        "construtora",
+        "nome",
+        "localizacao",
+        "tipo_edificacao",
+        "tipologia",
+        "qtd_apartamentos",
+        "qtd_lojas",
+        "qtd_restaurantes",
+        "porcentagem_entre_trafos",
+        "porcentagem_entre_quadros"
+      ],
+      "properties": {
+        "numero_cadastro": {
+          "type": "string"
+        },
+        "construtora": {
+          "type": "string"
+        },
+        "nome": {
+          "type": "string"
+        },
+        "localizacao": {
+          "type": "string"
+        },
+        "tipo_edificacao": {
+          "type": "string"
+        },
+        "tipologia": {
+          "type": "string"
+        },
+        "qtd_apartamentos": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "qtd_lojas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "qtd_restaurantes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "porcentagem_entre_trafos": {
+          "type": "string"
+        },
+        "porcentagem_entre_quadros": {
+          "type": "string"
+        }
+      }
+    },
+    "energia": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tem_subestacao"],
+      "properties": {
+        "tem_subestacao": {
+          "type": "boolean"
+        },
+        "tipo_subestacao": {
+          "type": ["string", "null"]
+        },
+        "potencia_transformador_kva": {
+          "type": ["number", "null"]
+        },
+        "tap_descricao": {
+          "type": ["string", "null"]
+        },
+        "tensao_secundaria": {
+          "type": ["string", "null"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tem_subestacao": {
+                "const": true
+              }
+            },
+            "required": ["tem_subestacao"]
+          },
+          "then": {
+            "required": [
+              "tipo_subestacao",
+              "potencia_transformador_kva",
+              "tap_descricao",
+              "tensao_secundaria"
+            ]
+          }
+        }
+      ]
+    },
+    "mt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tensao_kv": {
+          "type": ["number", "null"]
+        },
+        "diametro_eletroduto_pol": {
+          "type": ["number", "null"]
+        },
+        "tipo_cabo": {
+          "type": ["string", "null"]
+        },
+        "temperatura_cabo": {
+          "type": ["number", "null"]
+        },
+        "classe_isolacao": {
+          "type": ["string", "null"]
+        },
+        "secao_cabo_mm2": {
+          "type": ["number", "null"]
+        }
+      }
+    },
+    "aterramento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "qtd_hastes",
+        "secao_cabo_cobre_mm2",
+        "tipo_sistema",
+        "secao_cabo_malha_mm2",
+        "local_bep"
+      ],
+      "properties": {
+        "qtd_hastes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "secao_cabo_cobre_mm2": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tipo_sistema": {
+          "type": "string",
+          "enum": ["TN-S", "TN-C", "TN-C-S", "TT", "IT"]
+        },
+        "secao_cabo_malha_mm2": {
+          "type": "number",
+          "minimum": 0
+        },
+        "local_bep": {
+          "type": "string"
+        }
+      }
+    },
+    "gerador": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "qtd",
+        "potencia_kva",
+        "tipo_atendimento"
+      ],
+      "properties": {
+        "qtd": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "potencia_kva": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tipo_atendimento": {
+          "type": "string",
+          "enum": ["edificio", "condominio", "parcial"]
+        },
+        "circuitos_atendidos": {
+          "type": ["string", "null"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tipo_atendimento": {
+                "const": "parcial"
+              }
+            },
+            "required": ["tipo_atendimento"]
+          },
+          "then": {
+            "required": ["circuitos_atendidos"]
+          }
+        }
+      ]
+    },
+    "nao_inclusos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tem_itens",
+        "cpct",
+        "cftv",
+        "alarme_patrimonial",
+        "sonorizacao",
+        "alarme_incendio",
+        "automacao"
+      ],
+      "properties": {
+        "tem_itens": {
+          "type": "boolean"
+        },
+        "cpct": {
+          "type": "boolean"
+        },
+        "cftv": {
+          "type": "boolean"
+        },
+        "alarme_patrimonial": {
+          "type": "boolean"
+        },
+        "sonorizacao": {
+          "type": "boolean"
+        },
+        "alarme_incendio": {
+          "type": "boolean"
+        },
+        "automacao": {
+          "type": "boolean"
+        }
+      }
+    },
+    "instalacao": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["perfilado_tipo"],
+      "properties": {
+        "perfilado_tipo": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

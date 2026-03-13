@@ -1,0 +1,58 @@
+{
+  "documento": {
+    "data_atual": "09 de janeiro de 2026"
+  },
+  "obra": {
+    "numero_cadastro": "67890/2026",
+    "construtora": "TecPred Engenharia",
+    "nome": "Edifício Exemplo",
+    "localizacao": "João Pessoa - PB",
+    "tipo_edificacao": "Residencial Multifamiliar",
+    "tipologia": "Térreo, 10 pavimentos tipo e cobertura",
+    "qtd_apartamentos": 40,
+    "qtd_lojas": 2,
+    "qtd_restaurantes": 1,
+    "porcentagem_entre_trafos": "1%",
+    "porcentagem_entre_quadros": "2%"
+  },
+  "energia": {
+    "tem_subestacao": false,
+    "tipo_subestacao": null,
+    "potencia_transformador_kva": null,
+    "tap_descricao": null,
+    "tensao_secundaria": null
+  },
+  "mt": {
+    "tensao_kv": 15,
+    "diametro_eletroduto_pol": 4,
+    "tipo_cabo": "EPR/XLPE",
+    "temperatura_cabo": 90,
+    "classe_isolacao": "8,7/15",
+    "secao_cabo_mm2": 35
+  },
+  "aterramento": {
+    "qtd_hastes": 7,
+    "secao_cabo_cobre_mm2": 50,
+    "tipo_sistema": "TN-S",
+    "secao_cabo_malha_mm2": 50,
+    "local_bep": "subsolo"
+  },
+  "gerador": {
+    "qtd": 2,
+    "potencia_kva": 550,
+    "tipo_atendimento": "parcial",
+    "circuitos_atendidos": "bombas, elevadores e iluminação de emergência"
+  },
+  "nao_inclusos": {
+    "tem_itens": false,
+    "cpct": false,
+    "cftv": false,
+    "alarme_patrimonial": false,
+    "sonorizacao": false,
+    "alarme_incendio": false,
+    "automacao": false
+  },
+  "instalacao": {
+    "perfilado_tipo": "eletrocalha lisa galvanizada"
+  }
+}

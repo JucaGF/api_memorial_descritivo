@@ -1,0 +1,16 @@
+# Configuração do Codex específica para este repositório
+
+model = "gpt-5.4"
+
+approval_policy = "on-request"
+
+sandbox_mode = "workspace-write"
+
+model_reasoning_effort = "medium"
+plan_mode_reasoning_effort = "high"
+
+model_reasoning_summary = "auto"
+model_verbosity = "medium"
+
+[sandbox_workspace_write]
+network_access = false
