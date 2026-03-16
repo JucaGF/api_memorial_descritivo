@@ -13,4 +13,4 @@ model_reasoning_summary = "auto"
 model_verbosity = "medium"
 
 [sandbox_workspace_write]
-network_access = false
+network_access = true
