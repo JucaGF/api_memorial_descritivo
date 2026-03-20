@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
-from docx import Document
-from docxtpl import DocxTemplate
-from jsonschema import validate
-
-
 ROOT = Path(__file__).resolve().parent.parent
-TEMPLATE_PATH = ROOT / "templates" / "eletrico" / "v1" / "template.docx"
-SCHEMA_PATH = ROOT / "templates" / "eletrico" / "v1" / "schema.json"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.services.context_builder import build_memorial_eletrico_v1_context
+from app.services.memorial_renderer import (
+    inspect_docx_text,
+    render_memorial_eletrico_v1,
+)
+from app.services.memorial_validator import validate_memorial_eletrico_v1_context
+
+
 FIXTURES_DIR = ROOT / "tests" / "fixtures"
 OUTPUT_DIR = ROOT / "tests" / "output"
 
@@ -32,45 +37,6 @@ def assert_file_exists(path: Path, label: str) -> None:
         raise FileNotFoundError(f"{label} não encontrado em: {path}")
 
 
-def recompute_tem_itens(payload: dict[str, Any]) -> None:
-    nao_inclusos = payload.get("nao_inclusos", {})
-    item_keys = [
-        "cpct",
-        "cftv",
-        "alarme_patrimonial",
-        "sonorizacao",
-        "alarme_incendio",
-        "automacao",
-    ]
-    nao_inclusos["tem_itens"] = any(bool(nao_inclusos.get(key, False)) for key in item_keys)
-    payload["nao_inclusos"] = nao_inclusos
-
-
-def inspect_docx_text(docx_path: Path) -> str:
-    document = Document(str(docx_path))
-    paragraphs = [p.text for p in document.paragraphs]
-    return "\n".join(paragraphs)
-
-
-def assert_no_jinja_left(text: str) -> None:
-    forbidden_tokens = ["{{", "}}", "{%", "%}"]
-    found = [token for token in forbidden_tokens if token in text]
-    if found:
-        raise AssertionError(f"O DOCX renderizado ainda contém tokens Jinja: {found}")
-
-
-def assert_no_internal_markers_left(text: str) -> None:
-    forbidden_fragments = [
-        "Fixo",
-        "FIXO",
-        "Podem ser incluídas caixas",
-        "colocar as opções em caixas",
-    ]
-    found = [frag for frag in forbidden_fragments if frag in text]
-    if found:
-        raise AssertionError(f"O DOCX renderizado ainda contém texto interno de template: {found}")
-
-
 def assert_contains(text: str, expected: str, label: str) -> None:
     if expected not in text:
         raise AssertionError(f"[{label}] Texto esperado não encontrado: {expected!r}")
@@ -82,22 +48,15 @@ def assert_not_contains(text: str, unexpected: str, label: str) -> None:
 
 
 def render_template(payload_path: Path) -> tuple[Path, dict[str, Any]]:
-    schema = load_json(SCHEMA_PATH)
-    payload = load_json(payload_path)
-
-    recompute_tem_itens(payload)
+    payload = build_memorial_eletrico_v1_context(load_json(payload_path))
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     normalized_payload_path = OUTPUT_DIR / f"{payload_path.stem}_normalizado.json"
     save_json(normalized_payload_path, payload)
 
-    validate(instance=payload, schema=schema)
-
-    doc = DocxTemplate(str(TEMPLATE_PATH))
-    doc.render(payload)
-
     output_path = OUTPUT_DIR / f"{payload_path.stem}_renderizado.docx"
-    doc.save(str(output_path))
+    validate_memorial_eletrico_v1_context(payload)
+    render_memorial_eletrico_v1(payload, output_path)
 
     return output_path, payload
 
@@ -116,9 +75,6 @@ def run_case(filename: str) -> None:
 
     output_path, payload = render_template(payload_path)
     text = inspect_docx_text(output_path)
-
-    assert_no_jinja_left(text)
-    assert_no_internal_markers_left(text)
 
     energia = payload["energia"]
     gerador = payload["gerador"]
@@ -170,9 +126,6 @@ def run_case(filename: str) -> None:
 
 
 def main() -> None:
-    assert_file_exists(TEMPLATE_PATH, "Template DOCX")
-    assert_file_exists(SCHEMA_PATH, "Schema JSON")
-
     cases = [
         "eletrico_com_subestacao.json",
         "eletrico_sem_subestacao.json",

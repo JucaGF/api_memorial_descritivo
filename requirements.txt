@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+jsonschema
+python-docx
+docxtpl
+pytest
+httpx
+python-multipart
