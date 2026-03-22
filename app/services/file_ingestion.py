@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import mkdtemp
+from typing import Protocol, runtime_checkable
 
-from fastapi import UploadFile
+
+@runtime_checkable
+class UploadedFile(Protocol):
+    filename: str | None
+    content_type: str | None
+
+    async def read(self, size: int = -1) -> bytes: ...
+    async def close(self) -> None: ...
 
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx"}
@@ -26,13 +34,13 @@ class IngestedFileMetadata:
     content_type: str
     extension: str
     size_bytes: int
-    saved_path: str
+    saved_path: str = field(repr=False)
 
 
 @dataclass(frozen=True)
 class FileIngestionResult:
-    request_dir: str
     files: list[IngestedFileMetadata]
+    request_dir: str = field(repr=False)
 
 
 class FileIngestionError(Exception):
@@ -53,7 +61,7 @@ def _safe_filename_stem(filename: str) -> str:
     return sanitized or "arquivo"
 
 
-def _validate_upload(upload: UploadFile) -> tuple[str, str]:
+def _validate_upload(upload: UploadedFile) -> tuple[str, str]:
     if not upload.filename:
         raise FileIngestionError("Todos os arquivos enviados precisam ter nome.")
 
@@ -72,7 +80,7 @@ def _validate_upload(upload: UploadFile) -> tuple[str, str]:
     return extension, content_type
 
 
-async def ingest_uploaded_files(files: list[UploadFile]) -> FileIngestionResult:
+async def ingest_uploaded_files(files: list[UploadedFile]) -> FileIngestionResult:
     if not files:
         raise FileIngestionError("Envie ao menos um arquivo PDF ou DOCX.")
 

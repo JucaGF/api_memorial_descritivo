@@ -4,8 +4,6 @@ import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 
-from docx import Document
-
 from app.services.file_ingestion import IngestedFileMetadata
 
 
@@ -33,8 +31,19 @@ def has_pdf_extractor_dependency() -> bool:
     return importlib.util.find_spec("fitz") is not None
 
 
+def has_docx_extractor_dependency() -> bool:
+    return importlib.util.find_spec("docx") is not None
+
+
 def _extract_docx_text(file_path: Path) -> str:
+    if not has_docx_extractor_dependency():
+        raise ProjectExtractionError(
+            "Extracao de DOCX indisponivel: instale python-docx para processar arquivos DOCX."
+        )
+
     try:
+        from docx import Document
+
         document = Document(str(file_path))
     except Exception as error:
         raise ProjectExtractionError(
