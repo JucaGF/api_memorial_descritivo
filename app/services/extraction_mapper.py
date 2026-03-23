@@ -1,12 +1,56 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from app.services.project_extractor import ProjectExtractionResult
 
 
 ATERRAMENTO_SYSTEMS = ("TN-C-S", "TN-S", "TN-C", "TT", "IT")
+
+# Campos que o mapper atual tenta extrair do texto dos projetos.
+EXTRACTABLE_BY_MAPPER = (
+    "obra.construtora",
+    "obra.nome",
+    "obra.localizacao",
+    "energia.tem_subestacao",
+    "energia.tipo_subestacao",
+    "aterramento.tipo_sistema",
+    "mt.tensao_kv",
+    "mt.secao_cabo_mm2",
+)
+
+# Campos extraíveis identificados nos projetos reais, ainda não implementados.
+PENDING_EXTRACTION = (
+    "obra.numero_cadastro",
+    "obra.tipo_edificacao",
+    "obra.tipologia",
+    "obra.qtd_apartamentos",
+    "obra.qtd_lojas",
+    "obra.qtd_restaurantes",
+    "aterramento.qtd_hastes",
+    "aterramento.secao_cabo_cobre_mm2",
+    "aterramento.secao_cabo_malha_mm2",
+    "aterramento.local_bep",
+    "gerador.qtd",
+    "gerador.potencia_kva",
+    "gerador.tipo_atendimento",
+    "nao_inclusos.cpct",
+    "nao_inclusos.cftv",
+    "nao_inclusos.alarme_patrimonial",
+    "nao_inclusos.sonorizacao",
+    "nao_inclusos.alarme_incendio",
+    "nao_inclusos.automacao",
+    "instalacao.perfilado_tipo",
+)
+
+
+@dataclass(frozen=True)
+class ExtractionReport:
+    filled: list[str]
+    missing: list[str]
+    pending: list[str]
 
 
 def _normalize_text(text: str) -> str:
@@ -153,6 +197,31 @@ def _extract_mt_secao_cabo_mm2(text: str) -> float | int | None:
             r"(\d+(?:[.,]\d+)?)\s*mm2\b",
         ],
         text=text,
+    )
+
+
+def _get_nested_value(context: dict[str, Any], path: str) -> Any:
+    value: Any = context
+    for key in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def assess_extraction_coverage(partial_context: dict[str, Any]) -> ExtractionReport:
+    filled = []
+    missing = []
+    for field_path in EXTRACTABLE_BY_MAPPER:
+        value = _get_nested_value(partial_context, field_path)
+        if value is not None:
+            filled.append(field_path)
+        else:
+            missing.append(field_path)
+    return ExtractionReport(
+        filled=filled,
+        missing=missing,
+        pending=list(PENDING_EXTRACTION),
     )
 
 

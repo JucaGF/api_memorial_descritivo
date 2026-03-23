@@ -19,8 +19,13 @@ class ValidationIssue:
 
 
 class MemorialValidationError(Exception):
-    def __init__(self, issues: list[ValidationIssue]) -> None:
+    def __init__(
+        self,
+        issues: list[ValidationIssue],
+        extraction_report: dict | None = None,
+    ) -> None:
         self.issues = issues
+        self.extraction_report = extraction_report
         summary = "; ".join(f"{issue.path}: {issue.message}" for issue in issues)
         super().__init__(f"Contexto do memorial invalido. {summary}")
 

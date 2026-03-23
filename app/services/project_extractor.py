@@ -27,6 +27,9 @@ class ProjectExtractionError(Exception):
     pass
 
 
+MIN_EXTRACTABLE_CHARACTERS = 100
+
+
 def has_pdf_extractor_dependency() -> bool:
     return importlib.util.find_spec("fitz") is not None
 
@@ -107,6 +110,13 @@ def extract_project_files(
     raw_text = "\n\n".join(
         source_file.extracted_text for source_file in extracted_files if source_file.extracted_text
     )
+
+    if len(raw_text) < MIN_EXTRACTABLE_CHARACTERS:
+        raise ProjectExtractionError(
+            "Texto insuficiente extraído dos arquivos enviados. "
+            "Verifique se os PDFs contêm texto selecionável (não são imagens escaneadas)."
+        )
+
     signals = {
         "total_files": len(extracted_files),
         "file_types": [source_file.extension for source_file in extracted_files],

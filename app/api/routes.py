@@ -37,20 +37,20 @@ def _remove_file(path: Path) -> None:
 
 
 def _validation_error_response(error: MemorialValidationError) -> JSONResponse:
-    return JSONResponse(
-        status_code=400,
-        content={
-            "detail": "Payload invalido para o memorial eletrico v1.",
-            "errors": [
-                {
-                    "path": issue.path,
-                    "message": issue.message,
-                    "validator": issue.validator,
-                }
-                for issue in error.issues
-            ],
-        },
-    )
+    content: dict = {
+        "detail": "Payload invalido para o memorial eletrico v1.",
+        "errors": [
+            {
+                "path": issue.path,
+                "message": issue.message,
+                "validator": issue.validator,
+            }
+            for issue in error.issues
+        ],
+    }
+    if error.extraction_report is not None:
+        content["extraction_report"] = error.extraction_report
+    return JSONResponse(status_code=400, content=content)
 
 
 def _docx_file_response(
