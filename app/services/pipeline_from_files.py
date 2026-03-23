@@ -22,11 +22,11 @@ def generate_memorial_eletrico_v1_from_ingested_files(
     output_path: Path,
 ) -> PipelineResult:
     extraction_result = extract_project_files(files)
-    partial_context = map_extraction_to_partial_context(extraction_result)
-    report = assess_extraction_coverage(partial_context)
+    mapping = map_extraction_to_partial_context(extraction_result)
+    report = assess_extraction_coverage(mapping)
 
     try:
-        result = generate_memorial_eletrico_v1(partial_context, output_path)
+        result = generate_memorial_eletrico_v1(mapping.context, output_path)
         return PipelineResult(
             context=result.context,
             output_path=result.output_path,
