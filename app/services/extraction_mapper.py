@@ -182,12 +182,14 @@ def _extract_construtora(raw_text: str) -> FieldExtraction | None:
     result = _find_company_line(raw_text)
     if result:
         i, lines = result
-        return FieldExtraction(
-            value=lines[i],
-            evidence=lines[i],
-            rule="carimbo_company_pattern",
-            confidence="high",
+        company_line = lines[i]
+        # Strip label prefix if the line is "CONSTRUTORA: VALUE" style
+        labeled = _extract_labeled_value(
+            company_line,
+            labels=[r"construtora", r"empresa construtora", r"construtor", r"propriet[áa]rio"],
         )
+        value = labeled[0] if labeled else company_line
+        return FieldExtraction(value=value, evidence=company_line, rule="carimbo_company_pattern", confidence="high")
     labeled = _extract_labeled_value(
         raw_text,
         labels=[r"construtora", r"empresa construtora", r"respons[áa]vel pela obra", "construtor"],

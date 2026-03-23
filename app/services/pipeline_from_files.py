@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.services.extraction_mapper import (
+    ExtractionReport,
+    MappingResult,
     assess_extraction_coverage,
     map_extraction_to_partial_context,
 )
@@ -15,6 +17,15 @@ from app.services.file_ingestion import (
 from app.services.memorial_validator import MemorialValidationError
 from app.services.pipeline import PipelineResult, generate_memorial_eletrico_v1
 from app.services.project_extractor import extract_project_files
+
+
+def extract_mapping_from_ingested_files(
+    files: list[IngestedFileMetadata],
+) -> tuple[MappingResult, ExtractionReport]:
+    extraction_result = extract_project_files(files)
+    mapping = map_extraction_to_partial_context(extraction_result)
+    report = assess_extraction_coverage(mapping)
+    return mapping, report
 
 
 def generate_memorial_eletrico_v1_from_ingested_files(

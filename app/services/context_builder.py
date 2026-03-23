@@ -25,6 +25,17 @@ NULLABLE_ENERGIA_KEYS = (
 )
 
 
+def merge_context(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Deep merge: overrides take precedence over base at every nesting level."""
+    result = deepcopy(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_context(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def _ensure_dict(payload: dict[str, Any], key: str) -> dict[str, Any]:
     section = payload.get(key)
     if isinstance(section, dict):

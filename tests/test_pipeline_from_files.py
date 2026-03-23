@@ -4,14 +4,16 @@ import io
 from pathlib import Path
 from tempfile import mkdtemp
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import UploadFile
 
+from app.services.extraction_mapper import ExtractionReport, FieldExtraction, MappingResult
 from app.services.file_ingestion import FileIngestionResult, IngestedFileMetadata
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
 from app.services.pipeline_from_files import (
+    extract_mapping_from_ingested_files,
     generate_memorial_eletrico_v1_from_ingested_files,
     generate_memorial_eletrico_v1_from_uploaded_files,
 )
@@ -34,108 +36,119 @@ def build_ingested_file() -> IngestedFileMetadata:
 
 def build_extraction_result() -> ProjectExtractionResult:
     return ProjectExtractionResult(
-        raw_text="CONSTRUTORA: Exemplo Engenharia",
+        raw_text="CONSTRUTORA: Exemplo Engenharia LTDA",
         source_files=[],
         signals={"total_files": 1},
     )
 
 
-class PipelineFromFilesTests(unittest.IsolatedAsyncioTestCase):
-    @patch("app.services.pipeline_from_files.render_memorial_eletrico_v1")
-    @patch("app.services.pipeline_from_files.validate_memorial_eletrico_v1_context")
-    @patch("app.services.pipeline_from_files.build_memorial_eletrico_v1_context")
+def build_mapping_result(partial_context: dict | None = None) -> MappingResult:
+    context = partial_context or {"obra": {"construtora": "Exemplo Engenharia LTDA"}}
+    return MappingResult(context=context, evidence={})
+
+
+def build_extraction_report() -> ExtractionReport:
+    return ExtractionReport(filled=["obra.construtora"], missing=[], pending=[])
+
+
+class GenerateFromIngestedFilesTests(unittest.TestCase):
+    @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1")
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
     @patch("app.services.pipeline_from_files.extract_project_files")
-    async def test_generate_memorial_eletrico_v1_from_ingested_files_runs_full_flow(
+    def test_runs_full_pipeline_and_returns_result(
         self,
         extract_mock,
         map_mock,
-        build_mock,
-        validate_mock,
-        render_mock,
+        assess_mock,
+        generate_mock,
     ) -> None:
         ingested_files = [build_ingested_file()]
         extraction_result = build_extraction_result()
-        partial_context = {"obra": {"construtora": "Exemplo Engenharia"}}
-        final_context = {"obra": {"construtora": "Exemplo Engenharia"}, "energia": {}}
+        mapping = build_mapping_result()
+        report = build_extraction_report()
         output_path = ROOT / "tests" / "output" / "pipeline_from_files.docx"
 
         extract_mock.return_value = extraction_result
-        map_mock.return_value = partial_context
-        build_mock.return_value = final_context
-        validate_mock.return_value = []
-        render_mock.return_value = output_path
-
-        result = generate_memorial_eletrico_v1_from_ingested_files(
-            ingested_files,
-            output_path,
+        map_mock.return_value = mapping
+        assess_mock.return_value = report
+        generate_mock.return_value = PipelineResult(
+            context=mapping.context, output_path=output_path
         )
+
+        result = generate_memorial_eletrico_v1_from_ingested_files(ingested_files, output_path)
 
         self.assertIsInstance(result, PipelineResult)
         self.assertEqual(result.output_path, output_path)
-        self.assertEqual(result.context, final_context)
+        self.assertEqual(result.extraction_report, report)
         extract_mock.assert_called_once_with(ingested_files)
         map_mock.assert_called_once_with(extraction_result)
-        build_mock.assert_called_once_with(partial_context)
-        validate_mock.assert_called_once_with(final_context)
-        render_mock.assert_called_once_with(final_context, output_path)
+        assess_mock.assert_called_once_with(mapping)
+        generate_mock.assert_called_once_with(mapping.context, output_path)
 
-    @patch("app.services.pipeline_from_files.render_memorial_eletrico_v1")
-    @patch("app.services.pipeline_from_files.validate_memorial_eletrico_v1_context")
-    @patch("app.services.pipeline_from_files.build_memorial_eletrico_v1_context")
+    @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1")
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
     @patch("app.services.pipeline_from_files.extract_project_files")
-    async def test_generate_memorial_eletrico_v1_from_ingested_files_does_not_render_on_validation_error(
+    def test_raises_validation_error_with_extraction_report(
         self,
         extract_mock,
         map_mock,
-        build_mock,
-        validate_mock,
-        render_mock,
+        assess_mock,
+        generate_mock,
     ) -> None:
         ingested_files = [build_ingested_file()]
-        extraction_result = build_extraction_result()
-        partial_context = {"obra": {"construtora": "Exemplo Engenharia"}}
-        incomplete_context = {"obra": {"construtora": "Exemplo Engenharia"}}
+        mapping = build_mapping_result()
+        report = build_extraction_report()
         output_path = ROOT / "tests" / "output" / "pipeline_from_files_invalid.docx"
 
-        extract_mock.return_value = extraction_result
-        map_mock.return_value = partial_context
-        build_mock.return_value = incomplete_context
-        validate_mock.side_effect = MemorialValidationError(
-            [
-                ValidationIssue(
-                    path="$",
-                    message="'documento' is a required property",
-                    validator="required",
-                )
-            ]
+        extract_mock.return_value = build_extraction_result()
+        map_mock.return_value = mapping
+        assess_mock.return_value = report
+        generate_mock.side_effect = MemorialValidationError(
+            [ValidationIssue(path="$", message="'documento' is a required property", validator="required")]
         )
 
-        with self.assertRaises(MemorialValidationError):
-            generate_memorial_eletrico_v1_from_ingested_files(
-                ingested_files,
-                output_path,
-            )
+        with self.assertRaises(MemorialValidationError) as ctx:
+            generate_memorial_eletrico_v1_from_ingested_files(ingested_files, output_path)
 
-        render_mock.assert_not_called()
+        self.assertIsNotNone(ctx.exception.extraction_report)
 
+
+class ExtractMappingFromIngestedFilesTests(unittest.TestCase):
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_returns_mapping_and_report(
+        self,
+        extract_mock,
+        map_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        mapping = build_mapping_result()
+        report = build_extraction_report()
+
+        extract_mock.return_value = build_extraction_result()
+        map_mock.return_value = mapping
+        assess_mock.return_value = report
+
+        result_mapping, result_report = extract_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping, mapping)
+        self.assertEqual(result_report, report)
+        assess_mock.assert_called_once_with(mapping)
+
+
+class GenerateFromUploadedFilesTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1_from_ingested_files")
     @patch("app.services.pipeline_from_files.ingest_uploaded_files", new_callable=AsyncMock)
-    async def test_generate_memorial_eletrico_v1_from_uploaded_files_reuses_ingestion_and_pipeline(
-        self,
-        ingest_mock,
-        pipeline_mock,
-    ) -> None:
+    async def test_calls_ingestion_and_pipeline(self, ingest_mock, pipeline_mock) -> None:
         upload_files = [
             UploadFile(
                 filename="projeto.docx",
                 file=io.BytesIO(b"PK\x03\x04docx"),
-                headers={
-                    "content-type": (
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    )
-                },
+                headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
             )
         ]
         ingested_files = [build_ingested_file()]
@@ -149,10 +162,7 @@ class PipelineFromFilesTests(unittest.IsolatedAsyncioTestCase):
         ingest_mock.return_value = ingestion_result
         pipeline_mock.return_value = expected_result
 
-        result = await generate_memorial_eletrico_v1_from_uploaded_files(
-            upload_files,
-            output_path,
-        )
+        result = await generate_memorial_eletrico_v1_from_uploaded_files(upload_files, output_path)
 
         self.assertEqual(result, expected_result)
         ingest_mock.assert_awaited_once_with(upload_files)
@@ -161,21 +171,14 @@ class PipelineFromFilesTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.services.pipeline_from_files.cleanup_ingestion_result")
     @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1_from_ingested_files")
     @patch("app.services.pipeline_from_files.ingest_uploaded_files", new_callable=AsyncMock)
-    async def test_generate_memorial_eletrico_v1_from_uploaded_files_cleans_temp_dir_even_on_error(
-        self,
-        ingest_mock,
-        pipeline_mock,
-        cleanup_mock,
+    async def test_cleanup_runs_even_on_error(
+        self, ingest_mock, pipeline_mock, cleanup_mock
     ) -> None:
         upload_files = [
             UploadFile(
                 filename="projeto.docx",
                 file=io.BytesIO(b"PK\x03\x04docx"),
-                headers={
-                    "content-type": (
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    )
-                },
+                headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
             )
         ]
         ingestion_result = FileIngestionResult(
@@ -185,13 +188,7 @@ class PipelineFromFilesTests(unittest.IsolatedAsyncioTestCase):
         output_path = ROOT / "tests" / "output" / "pipeline_from_uploaded_files_invalid.docx"
         ingest_mock.return_value = ingestion_result
         pipeline_mock.side_effect = MemorialValidationError(
-            [
-                ValidationIssue(
-                    path="$",
-                    message="'documento' is a required property",
-                    validator="required",
-                )
-            ]
+            [ValidationIssue(path="$", message="'documento' is a required property", validator="required")]
         )
 
         with self.assertRaises(MemorialValidationError):

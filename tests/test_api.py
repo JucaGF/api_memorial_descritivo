@@ -4,14 +4,16 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from docx import Document
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.extraction_mapper import ExtractionReport, MappingResult
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
+from app.services.session_store import ReviewSession
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -213,6 +215,174 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["detail"], "Payload invalido para o memorial eletrico v1.")
         self.assertTrue(body["errors"])
         self.assertEqual(body["errors"][0]["path"], "$")
+
+
+def _build_pending_session(session_id: str) -> ReviewSession:
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(tz=timezone.utc)
+    return ReviewSession(
+        session_id=session_id,
+        status="pending_review",
+        created_at=now.isoformat(),
+        expires_at=(now + timedelta(hours=24)).isoformat(),
+        partial_context={"obra": {"nome": "Makai", "construtora": "MGA LTDA"}},
+        extraction_report={"filled": ["obra.nome"], "missing": ["obra.tipo_edificacao"], "pending": [], "evidence": {}},
+        corrections={},
+    )
+
+
+class ReviewSessionApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = TestClient(app)
+
+    @patch("app.api.routes._process_review_session")
+    @patch("app.api.routes.create_session", return_value="test-session-id")
+    @patch("app.api.routes.ingest_uploaded_files", new_callable=AsyncMock)
+    def test_post_sessoes_returns_202_with_session_id(
+        self, ingest_mock, create_mock, process_mock
+    ) -> None:
+        ingest_mock.return_value = MagicMock(files=[])
+
+        files = [("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+        response = self.client.post("/api/v1/memoriais/eletrico/sessoes", files=files)
+
+        self.assertEqual(response.status_code, 202)
+        body = response.json()
+        self.assertEqual(body["session_id"], "test-session-id")
+        self.assertEqual(body["status"], "processing")
+
+    @patch("app.api.routes.load_session", return_value=None)
+    def test_get_sessoes_returns_404_for_unknown_id(self, _) -> None:
+        response = self.client.get("/api/v1/memoriais/eletrico/sessoes/nao-existe")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("não encontrada", response.json()["detail"])
+
+    @patch("app.api.routes.load_session")
+    def test_get_sessoes_returns_full_session_state(self, load_mock) -> None:
+        session = _build_pending_session("abc-123")
+        load_mock.return_value = session
+
+        response = self.client.get("/api/v1/memoriais/eletrico/sessoes/abc-123")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["session_id"], "abc-123")
+        self.assertEqual(body["status"], "pending_review")
+        self.assertIn("partial_context", body)
+        self.assertIn("extraction_report", body)
+
+    @patch("app.api.routes.load_session")
+    def test_patch_contexto_returns_409_when_still_processing(self, load_mock) -> None:
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(tz=timezone.utc)
+        load_mock.return_value = ReviewSession(
+            session_id="abc-123",
+            status="processing",
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(hours=24)).isoformat(),
+        )
+
+        response = self.client.patch(
+            "/api/v1/memoriais/eletrico/sessoes/abc-123/contexto",
+            json={"corrections": {"obra": {"nome": "Novo Nome"}}},
+        )
+
+        self.assertEqual(response.status_code, 409)
+
+    @patch("app.api.routes.update_session")
+    @patch("app.api.routes.load_session")
+    def test_patch_contexto_accumulates_corrections(
+        self, load_mock, update_mock
+    ) -> None:
+        session = _build_pending_session("abc-123")
+        session_with_existing = ReviewSession(
+            **{**session.__dict__, "corrections": {"obra": {"tipo_edificacao": "Residencial"}}}
+        )
+        load_mock.return_value = session_with_existing
+
+        updated_session = ReviewSession(
+            **{**session_with_existing.__dict__,
+               "corrections": {"obra": {"tipo_edificacao": "Residencial", "tipologia": "Vertical"}}}
+        )
+        update_mock.return_value = updated_session
+
+        response = self.client.patch(
+            "/api/v1/memoriais/eletrico/sessoes/abc-123/contexto",
+            json={"corrections": {"obra": {"tipologia": "Vertical"}}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        update_mock.assert_called_once()
+        merged = update_mock.call_args[1]["corrections"]
+        self.assertEqual(merged["obra"]["tipo_edificacao"], "Residencial")
+        self.assertEqual(merged["obra"]["tipologia"], "Vertical")
+
+    @patch("app.api.routes.load_session", return_value=None)
+    def test_post_gerar_returns_404_for_unknown_session(self, _) -> None:
+        response = self.client.post("/api/v1/memoriais/eletrico/sessoes/nao-existe/gerar")
+
+        self.assertEqual(response.status_code, 404)
+
+    @patch("app.api.routes.load_session")
+    def test_post_gerar_returns_409_when_session_still_processing(self, load_mock) -> None:
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(tz=timezone.utc)
+        load_mock.return_value = ReviewSession(
+            session_id="abc-123",
+            status="processing",
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(hours=24)).isoformat(),
+        )
+
+        response = self.client.post("/api/v1/memoriais/eletrico/sessoes/abc-123/gerar")
+
+        self.assertEqual(response.status_code, 409)
+
+    @patch("app.api.routes.delete_session")
+    @patch("app.api.routes.generate_memorial_eletrico_v1")
+    @patch("app.api.routes.load_session")
+    def test_post_gerar_returns_docx_on_success(
+        self, load_mock, generate_mock, delete_mock
+    ) -> None:
+        session = _build_pending_session("abc-123")
+        load_mock.return_value = session
+
+        def generate_side_effect(context, output_path):
+            doc = Document()
+            doc.add_paragraph("Memorial gerado.")
+            doc.save(output_path)
+            return PipelineResult(context=context, output_path=output_path)
+
+        generate_mock.side_effect = generate_side_effect
+
+        response = self.client.post("/api/v1/memoriais/eletrico/sessoes/abc-123/gerar")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertTrue(response.content.startswith(b"PK"))
+
+    @patch("app.api.routes.generate_memorial_eletrico_v1")
+    @patch("app.api.routes.load_session")
+    def test_post_gerar_returns_400_on_validation_error(
+        self, load_mock, generate_mock
+    ) -> None:
+        session = _build_pending_session("abc-123")
+        load_mock.return_value = session
+        generate_mock.side_effect = MemorialValidationError(
+            [ValidationIssue(path="$.obra", message="'tipo_edificacao' is a required property", validator="required")]
+        )
+
+        response = self.client.post("/api/v1/memoriais/eletrico/sessoes/abc-123/gerar")
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["detail"], "Payload invalido para o memorial eletrico v1.")
+        self.assertTrue(body["errors"])
 
 
 if __name__ == "__main__":
