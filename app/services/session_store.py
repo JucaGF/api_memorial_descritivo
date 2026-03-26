@@ -86,3 +86,21 @@ def update_session(session_id: str, **kwargs: Any) -> ReviewSession | None:
 
 def delete_session(session_id: str) -> None:
     _session_path(session_id).unlink(missing_ok=True)
+
+
+# ── Backend override ──────────────────────────────────────────────────────────
+# When SUPABASE_URL + SUPABASE_KEY are set, replace filesystem functions with
+# Supabase implementations. All callers (routes.py, tests) are unaffected.
+import os as _os  # noqa: E402
+
+if _os.getenv("SUPABASE_URL") and _os.getenv("SUPABASE_KEY"):
+    try:
+        from app.services.supabase_session_store import (  # noqa: F401, F811
+            create_session,
+            delete_session,
+            load_session,
+            save_session,
+            update_session,
+        )
+    except ImportError:
+        pass  # supabase package not installed — keep filesystem backend
