@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timedelta, timezone
 
 from docx import Document
 from fastapi.testclient import TestClient
@@ -252,12 +253,72 @@ class ReviewSessionApiTests(unittest.TestCase):
         self.assertEqual(body["session_id"], "test-session-id")
         self.assertEqual(body["status"], "processing")
 
+    @patch("app.api.routes.cleanup_ingestion_result")
+    @patch("app.api.routes.create_session", side_effect=RuntimeError("db down"))
+    @patch("app.api.routes.ingest_uploaded_files", new_callable=AsyncMock)
+    def test_post_sessoes_cleans_temp_files_when_create_session_fails(
+        self,
+        ingest_mock,
+        create_mock,
+        cleanup_mock,
+    ) -> None:
+        ingestion_result = MagicMock(files=[])
+        ingest_mock.return_value = ingestion_result
+        files = [("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+
+        with self.assertRaises(RuntimeError):
+            self.client.post("/api/v1/memoriais/eletrico/sessoes", files=files)
+
+        cleanup_mock.assert_called_once_with(ingestion_result)
+
+    @patch("app.api.routes.delete_session")
+    @patch("app.api.routes.cleanup_ingestion_result")
+    @patch("app.api.routes.create_session", return_value="test-session-id")
+    @patch("app.api.routes.ingest_uploaded_files", new_callable=AsyncMock)
+    def test_post_sessoes_cleans_temp_files_and_deletes_session_when_add_task_fails(
+        self,
+        ingest_mock,
+        create_mock,
+        cleanup_mock,
+        delete_mock,
+    ) -> None:
+        ingestion_result = MagicMock(files=[])
+        ingest_mock.return_value = ingestion_result
+        files = [("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+
+        with patch("app.api.routes.BackgroundTasks.add_task", side_effect=RuntimeError("task queue down")):
+            with self.assertRaises(RuntimeError):
+                self.client.post("/api/v1/memoriais/eletrico/sessoes", files=files)
+
+        cleanup_mock.assert_called_once_with(ingestion_result)
+        delete_mock.assert_called_once_with("test-session-id")
+
     @patch("app.api.routes.load_session", return_value=None)
     def test_get_sessoes_returns_404_for_unknown_id(self, _) -> None:
         response = self.client.get("/api/v1/memoriais/eletrico/sessoes/nao-existe")
 
         self.assertEqual(response.status_code, 404)
         self.assertIn("não encontrada", response.json()["detail"])
+
+    def test_get_sessoes_returns_404_for_expired_session_in_filesystem_store(self) -> None:
+        from app.services import session_store
+
+        with TemporaryDirectory() as temp_dir:
+            session_id = "expired-session"
+            expired_session = ReviewSession(
+                session_id=session_id,
+                status="pending_review",
+                created_at=(datetime.now(tz=timezone.utc) - timedelta(days=2)).isoformat(),
+                expires_at=(datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat(),
+            )
+            session_file = Path(temp_dir) / f"{session_id}.json"
+            with patch("app.services.session_store._sessions_dir", return_value=Path(temp_dir)):
+                session_store.save_session(expired_session)
+
+                response = self.client.get(f"/api/v1/memoriais/eletrico/sessoes/{session_id}")
+
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse(session_file.exists())
 
     @patch("app.api.routes.load_session")
     def test_get_sessoes_returns_full_session_state(self, load_mock) -> None:
