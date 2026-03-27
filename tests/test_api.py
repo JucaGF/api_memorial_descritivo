@@ -333,6 +333,61 @@ class ReviewSessionApiTests(unittest.TestCase):
         self.assertEqual(body["status"], "pending_review")
         self.assertIn("partial_context", body)
         self.assertIn("extraction_report", body)
+        self.assertIn("filled", body["extraction_report"])
+        self.assertIn("missing", body["extraction_report"])
+        self.assertIn("pending", body["extraction_report"])
+        self.assertIn("evidence", body["extraction_report"])
+
+    @patch("app.api.routes.load_session")
+    def test_get_sessoes_preserves_typed_extraction_report_shape_with_evidence(self, load_mock) -> None:
+        session = _build_pending_session("abc-123")
+        session.extraction_report = {
+            "filled": ["obra.nome"],
+            "missing": ["obra.tipo_edificacao"],
+            "pending": [],
+            "evidence": {
+                "obra.nome": {
+                    "value": "Makai",
+                    "rule": "carimbo_line_before_company",
+                    "evidence": "'MAKAI' — linha anterior a 'MGA CONSTRUÇÕES'",
+                    "confidence": "high",
+                }
+            },
+        }
+        load_mock.return_value = session
+
+        response = self.client.get("/api/v1/memoriais/eletrico/sessoes/abc-123")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["extraction_report"]["filled"], ["obra.nome"])
+        self.assertEqual(
+            body["extraction_report"]["evidence"]["obra.nome"]["rule"],
+            "carimbo_line_before_company",
+        )
+        self.assertEqual(
+            body["extraction_report"]["evidence"]["obra.nome"]["confidence"],
+            "high",
+        )
+
+    @patch("app.api.routes.load_session")
+    def test_get_sessoes_accepts_empty_extraction_report_for_processing_compatibility(
+        self,
+        load_mock,
+    ) -> None:
+        now = datetime.now(tz=timezone.utc)
+        load_mock.return_value = ReviewSession(
+            session_id="abc-123",
+            status="processing",
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(hours=24)).isoformat(),
+            extraction_report={},
+        )
+
+        response = self.client.get("/api/v1/memoriais/eletrico/sessoes/abc-123")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["extraction_report"], {})
 
     @patch("app.api.routes.load_session")
     def test_patch_contexto_returns_409_when_still_processing(self, load_mock) -> None:
