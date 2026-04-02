@@ -14,6 +14,11 @@ venv/
 env/
 .env/
 
+# Variáveis de ambiente (nunca commitar dados reais)
+.env
+.env.local
+.env.production
+
 # Pytest
 .pytest_cache/
 .coverage
