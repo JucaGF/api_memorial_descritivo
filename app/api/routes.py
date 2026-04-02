@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -37,6 +38,7 @@ from app.services.session_store import (
     update_session,
 )
 
+logger = logging.getLogger(__name__)
 
 DOCX_MEDIA_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -157,7 +159,9 @@ def _process_review_session(session_id: str, ingestion_result: FileIngestionResu
             partial_context=mapping.context,
             extraction_report=asdict(report),
         )
+        logger.info("Session %s extraction complete: status=%s", session_id, STATUS_PENDING_REVIEW)
     except Exception as error:
+        logger.error("Session %s extraction failed: %s", session_id, error)
         update_session(session_id, status=STATUS_FAILED, error=str(error))
     finally:
         cleanup_ingestion_result(ingestion_result)
@@ -214,6 +218,7 @@ async def create_review_session(
     session_id: str | None = None
     try:
         session_id = create_session()
+        logger.info("Review session created: session_id=%s", session_id)
         background_tasks.add_task(_process_review_session, session_id, ingestion_result)
     except Exception:
         cleanup_ingestion_result(ingestion_result)

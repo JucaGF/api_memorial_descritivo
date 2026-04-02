@@ -13,6 +13,7 @@ from app.services.file_ingestion import FileIngestionResult, IngestedFileMetadat
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
 from app.services.pipeline_from_files import (
+    _fill_gaps,
     extract_mapping_from_ingested_files,
     generate_memorial_eletrico_v1_from_ingested_files,
     generate_memorial_eletrico_v1_from_uploaded_files,
@@ -195,6 +196,51 @@ class GenerateFromUploadedFilesTests(unittest.IsolatedAsyncioTestCase):
             await generate_memorial_eletrico_v1_from_uploaded_files(upload_files, output_path)
 
         cleanup_mock.assert_called_once_with(ingestion_result)
+
+
+class FillGapsTests(unittest.TestCase):
+    def test_fills_none_fields_from_supplement(self) -> None:
+        base = {"obra": {"construtora": "Alpha", "nome": None}}
+        supplement = {"obra": {"construtora": "Beta", "nome": "Edifício X"}}
+
+        filled = _fill_gaps(base, supplement)
+
+        self.assertEqual(filled, {"obra": {"nome": "Edifício X"}})
+
+    def test_does_not_overwrite_existing_values(self) -> None:
+        base = {"obra": {"construtora": "Alpha"}}
+        supplement = {"obra": {"construtora": "Beta"}}
+
+        filled = _fill_gaps(base, supplement)
+
+        self.assertEqual(filled, {})
+
+    def test_fills_missing_section(self) -> None:
+        base = {"obra": {"construtora": "Alpha"}}
+        supplement = {"energia": {"tem_subestacao": True}}
+
+        filled = _fill_gaps(base, supplement)
+
+        self.assertEqual(filled, {"energia": {"tem_subestacao": True}})
+
+    def test_ignores_non_dict_sections(self) -> None:
+        base = {"obra": {"construtora": "Alpha"}}
+        supplement = {"observacoes": "nota", "obra": {"nome": "Ed"}}
+
+        filled = _fill_gaps(base, supplement)
+
+        self.assertEqual(filled, {"obra": {"nome": "Ed"}})
+
+    def test_empty_supplement_returns_empty(self) -> None:
+        self.assertEqual(_fill_gaps({"obra": {"construtora": "A"}}, {}), {})
+
+    def test_supplement_null_values_not_applied(self) -> None:
+        base = {"obra": {"construtora": None}}
+        supplement = {"obra": {"construtora": None}}
+
+        filled = _fill_gaps(base, supplement)
+
+        self.assertEqual(filled, {})
 
 
 if __name__ == "__main__":
