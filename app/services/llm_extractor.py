@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -11,11 +12,9 @@ from app.services.project_extractor import ExtractedSourceFile
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 1
-RATE_LIMIT_WAIT_SECONDS = 30
 
+# ── Extraction schema ─────────────────────────────────────────────────────────
 
-# ── Schema de extração ───────────────────────────────────────────────────────
 
 class ObraExtraction(BaseModel):
     construtora: str | None = None
@@ -24,8 +23,10 @@ class ObraExtraction(BaseModel):
     numero_cadastro: str | None = None
     tipo_edificacao: str | None = None
     tipologia: str | None = None
+    qtd_apartamentos: int | None = None
     qtd_lojas: int | None = None
     qtd_restaurantes: int | None = None
+
 
 class EnergiaExtraction(BaseModel):
     tem_subestacao: bool | None = None
@@ -34,6 +35,7 @@ class EnergiaExtraction(BaseModel):
     tap_descricao: str | None = None
     tensao_secundaria: str | None = None
 
+
 class AterramentoExtraction(BaseModel):
     tipo_sistema: str | None = None
     qtd_hastes: int | None = None
@@ -41,9 +43,15 @@ class AterramentoExtraction(BaseModel):
     secao_cabo_malha_mm2: float | None = None
     local_bep: str | None = None
 
+
 class MTExtraction(BaseModel):
     tensao_kv: float | None = None
+    diametro_eletroduto_pol: float | None = None
+    tipo_cabo: str | None = None
+    temperatura_cabo: float | None = None
+    classe_isolacao: str | None = None
     secao_cabo_mm2: float | None = None
+
 
 class GeradorExtraction(BaseModel):
     tipo_atendimento: str | None = None
@@ -51,53 +59,139 @@ class GeradorExtraction(BaseModel):
     potencia_kva: float | None = None
     circuitos_atendidos: str | None = None
 
+
+class NaoInclusosExtraction(BaseModel):
+    cpct: bool | None = None
+    cftv: bool | None = None
+    alarme_patrimonial: bool | None = None
+    sonorizacao: bool | None = None
+    alarme_incendio: bool | None = None
+    automacao: bool | None = None
+
+
+class InstalacaoExtraction(BaseModel):
+    perfilado_tipo: str | None = None
+
+
 class LLMExtraction(BaseModel):
     obra: ObraExtraction = ObraExtraction()
     energia: EnergiaExtraction = EnergiaExtraction()
     aterramento: AterramentoExtraction = AterramentoExtraction()
     mt: MTExtraction = MTExtraction()
     gerador: GeradorExtraction = GeradorExtraction()
+    nao_inclusos: NaoInclusosExtraction = NaoInclusosExtraction()
+    instalacao: InstalacaoExtraction = InstalacaoExtraction()
     observacoes: str | None = None
 
 
-# ── Prompt ────────────────────────────────────────────────────────────────────
+# ── Prompts ───────────────────────────────────────────────────────────────────
 
-PROMPT = """\
-Você é um extrator estruturado de dados de projetos elétricos brasileiros.
+EXTRACTION_PROMPT = """\
+You are an expert structured data extractor for Brazilian electrical engineering projects.
 
-Receberá texto extraído de pranchas técnicas de um projeto elétrico.
-Extraia apenas os campos solicitados no schema.
+You will receive page images from technical drawings (pranchas) of an electrical project, \
+along with supplementary OCR text. The images are the PRIMARY source of truth — use visual \
+inspection of diagrams, title blocks, legends, and annotations. Use the OCR text only to \
+confirm or complement what you see in the images.
 
-Contexto técnico importante:
-- MT = média tensão (tipicamente 13.8kV ou 15kV no Brasil). NÃO confunda com BT (baixa tensão: 220V/380V).
-- mt.tensao_kv refere-se à tensão do RAMAL DE MÉDIA TENSÃO, não à tensão secundária.
-- mt.secao_cabo_mm2 é a seção do cabo de MT, não de BT.
-- energia.tem_subestacao = true se houver menção a subestação, transformador abaixador, ou medição em MT.
-- energia.potencia_transformador_kva: potência nominal do transformador da subestação em kVA (ex: 500, 1000, 1500).
-- energia.tap_descricao: descrição do tap do transformador (ex: "tap nominal", "tap +2,5%").
-- energia.tensao_secundaria: tensão secundária do transformador (ex: "220/127V", "380/220V").
-- aterramento.tipo_sistema: valores típicos são "TN-S", "TN-C-S", "TT", "IT".
-- aterramento.local_bep: local do Barramento de Equipotencialização Principal (ex: "subsolo", "térreo").
-- aterramento.secao_cabo_malha_mm2: seção do cabo da malha de aterramento, em mm².
-- gerador.tipo_atendimento: deve ser um destes valores:
-  "condominio" (atende áreas comuns), "edificio" (atende todo o edifício),
-  "parcial" (atende apenas circuitos específicos como bombas/elevadores).
-  Infira a partir do contexto do quadro de gerador.
-- gerador.qtd: quantidade de grupos geradores.
-- gerador.potencia_kva: potência nominal do gerador em kVA.
-- gerador.circuitos_atendidos: quando tipo_atendimento="parcial", descreva quais circuitos o gerador atende (ex: "elevadores, bombas de recalque, iluminação de emergência").
-- obra.tipo_edificacao: tipo geral (ex: "residencial", "comercial", "misto").
-- obra.tipologia: descrição da tipologia (ex: "torre única", "2 torres", "condomínio horizontal").
-- obra.qtd_lojas: quantidade de unidades comerciais/lojas, se houver.
-- obra.qtd_restaurantes: quantidade de restaurantes, se houver.
+## Where to look for each field
 
-Regras obrigatórias:
-- Use apenas evidências presentes no texto fornecido.
-- Se não houver evidência suficiente, retorne null.
-- Não invente valores.
-- Para valores numéricos, retorne número e não string.
-- Em observacoes, resuma ambiguidades ou limitações da extração.
+### obra (project info)
+Look at the TITLE BLOCK (carimbo) — usually bottom-right corner of each drawing page.
+- construtora: company name (look for "LTDA", "S.A.", "ENGENHARIA", "INCORPORAÇÃO")
+- nome: building/project name (usually the largest text in the title block, above the company)
+- localizacao: address (look for "AV.", "RUA", city, state)
+- numero_cadastro: project number (look for "PROJETO N°", "N° DO PROCESSO")
+- tipo_edificacao: "residencial", "comercial", or "misto" — infer from the drawings
+- tipologia: e.g. "torre única", "2 torres", "condomínio horizontal"
+- qtd_apartamentos: count apartment units from unit lists or load tables
+- qtd_lojas: count commercial units if present
+- qtd_restaurantes: count restaurants if present (0 if none)
+
+### energia (power supply)
+Look at the SINGLE-LINE DIAGRAM (diagrama unifilar geral) for the main power distribution.
+- tem_subestacao: true if you see a transformer symbol, "subestação", or "cabine primária"
+- tipo_subestacao: description (e.g. "subestação abrigada", "subestação aérea simplificada")
+- potencia_transformador_kva: transformer rated power in kVA (e.g. 500, 1000, 1500)
+- tap_descricao: transformer tap setting (e.g. "tap nominal", "tap +2,5%")
+- tensao_secundaria: secondary voltage (e.g. "220/127V", "380/220V")
+
+### mt (medium voltage)
+Look at the MT section of the single-line diagram. MT = média tensão, typically 13.8kV or 15kV.
+CRITICAL: Do NOT confuse with BT (baixa tensão: 220V/380V). MT voltages are 13.8kV, 15kV, 34.5kV.
+- tensao_kv: voltage of the MT supply line (13.8 or 15, NOT 380 or 220)
+- diametro_eletroduto_pol: conduit diameter in inches for MT cables
+- tipo_cabo: MT cable type (e.g. "XLPE", "EPR")
+- temperatura_cabo: cable rated temperature in °C
+- classe_isolacao: insulation class (e.g. "8.7/15kV", "12/20kV")
+- secao_cabo_mm2: MT cable cross-section in mm² (typically 35, 50, 70, 95, 120, 150, 185, 240)
+
+### aterramento (grounding)
+Look at the GROUNDING DETAIL drawing and legend.
+- tipo_sistema: MUST be exactly one of: "TN-S", "TN-C", "TN-C-S", "TT", "IT"
+- qtd_hastes: count grounding rods from the detail or legend
+- secao_cabo_cobre_mm2: copper cable cross-section for grounding conductor in mm²
+- secao_cabo_malha_mm2: grounding mesh cable cross-section in mm²
+- local_bep: location of the BEP (e.g. "subsolo", "térreo", "casa de máquinas")
+
+### gerador (generator)
+Look at the GENERATOR section of the single-line diagram or the generator panel diagram.
+- tipo_atendimento: MUST be exactly one of:
+  "edificio" (serves the entire building including apartments),
+  "condominio" (serves only common areas),
+  "parcial" (serves specific circuits like pumps/elevators)
+- qtd: number of generator sets
+- potencia_kva: generator rated power in kVA
+- circuitos_atendidos: when tipo_atendimento="parcial", list which circuits (e.g. "elevadores, bombas de recalque")
+
+### nao_inclusos (systems NOT included in the electrical project)
+Examine the single-line diagrams and panel schedules for dedicated circuit boards.
+If a dedicated board/circuit EXISTS for a system → that system IS included → set to false.
+If NO dedicated board/circuit is found → system is NOT included → set to true.
+- cpct: CPCT system (portaria/interfone)
+- cftv: CCTV system
+- alarme_patrimonial: security alarm
+- sonorizacao: sound system
+- alarme_incendio: fire alarm
+- automacao: building automation
+
+### instalacao (installation details)
+Look at construction details and legends for cable tray/perfilado information.
+- perfilado_tipo: cable tray type (e.g. "C 38x38mm", "U 50x50mm")
+
+## Rules
+- Extract ONLY from evidence visible in the images or OCR text.
+- Return null for any field without sufficient evidence.
+- NEVER invent or guess values.
+- Numeric fields must be numbers, not strings.
+- In observacoes, briefly note any ambiguities or extraction limitations.
 """
+
+MERGE_PROMPT = """\
+You are merging structured extractions from multiple PDF files of the SAME electrical project.
+
+Each extraction below comes from a different file (drawing sheet) of the project. \
+Different sheets contain different information — for example, the general single-line diagram \
+has power supply info, grounding details are on the grounding sheet, apartment layouts show \
+unit counts, etc.
+
+Your task: produce a SINGLE unified extraction by intelligently merging the per-file results.
+
+Rules:
+- When multiple files provide the SAME field with DIFFERENT values, prefer the value from the \
+  file most likely to be authoritative (e.g. single-line diagram for energia/MT, grounding detail \
+  for aterramento, title block for obra info).
+- When only one file provides a field, use that value.
+- Return null only when NO file provided a value.
+- For nao_inclusos: if ANY file shows a dedicated circuit/board for a system, set it to false \
+  (system IS included). Only set to true if NO file shows evidence of it.
+- In observacoes, note any conflicts you resolved and which file you preferred.
+
+Per-file extractions:
+"""
+
+
+# ── Config ────────────────────────────────────────────────────────────────────
 
 
 def is_llm_extraction_enabled() -> bool:
@@ -105,23 +199,111 @@ def is_llm_extraction_enabled() -> bool:
 
 
 def _get_model() -> str:
-    return os.getenv("OPENAI_MODEL", "gpt-4.1")
+    return os.getenv("OPENAI_MODEL", "gpt-5.4")
 
 
 def _get_client() -> Any:
     from openai import OpenAI
+
     return OpenAI()
 
 
-def _build_input(texts: list[tuple[str, str]]) -> list[dict[str, Any]]:
-    sections = [f"=== ARQUIVO: {name} ===\n{text}" for name, text in texts]
-    return [{"role": "user", "content": f"{PROMPT}\n\n" + "\n\n".join(sections)}]
+# ── Vision input builders ─────────────────────────────────────────────────────
 
 
-def _extract_batch(client: Any, model: str, texts: list[tuple[str, str]]) -> dict[str, Any]:
+def _build_vision_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    """Build multimodal input: page images + supplementary OCR text."""
+    content: list[dict[str, Any]] = [
+        {"type": "input_text", "text": EXTRACTION_PROMPT},
+    ]
+
+    for page_image in source_file.page_images:
+        content.append({
+            "type": "input_image",
+            "image_url": page_image,
+            "detail": "original",
+        })
+
+    if source_file.extracted_text.strip():
+        content.append({
+            "type": "input_text",
+            "text": f"Supplementary OCR text from {source_file.original_filename}:\n"
+                    f"{source_file.extracted_text}",
+        })
+
+    return [{"role": "user", "content": content}]
+
+
+def _build_text_only_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    """Fallback for files without page images (e.g. DOCX)."""
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": EXTRACTION_PROMPT},
+        {
+            "type": "input_text",
+            "text": f"=== FILE: {source_file.original_filename} ===\n"
+                    f"{source_file.extracted_text}",
+        },
+    ]}]
+
+
+def _build_merge_input(
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    sections = []
+    for filename, extraction in per_file_results:
+        sections.append(f"=== {filename} ===\n{json.dumps(extraction, ensure_ascii=False, indent=2)}")
+
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": MERGE_PROMPT + "\n\n".join(sections)},
+    ]}]
+
+
+# ── Extraction ────────────────────────────────────────────────────────────────
+
+
+def _count_non_null_fields(extraction: dict[str, Any]) -> int:
+    return sum(
+        1 for section in extraction.values()
+        if isinstance(section, dict)
+        for v in section.values()
+        if v is not None
+    )
+
+
+def _extract_single_file(
+    client: Any,
+    model: str,
+    source_file: ExtractedSourceFile,
+) -> dict[str, Any]:
+    has_images = bool(source_file.page_images)
+    input_messages = (
+        _build_vision_input(source_file) if has_images
+        else _build_text_only_input(source_file)
+    )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": input_messages,
+        "text_format": LLMExtraction,
+    }
+    if has_images:
+        kwargs["reasoning"] = {"effort": "high"}
+
+    response = client.responses.parse(**kwargs)
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _merge_with_llm(
+    client: Any,
+    model: str,
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Use LLM to intelligently merge per-file extractions."""
     response = client.responses.parse(
         model=model,
-        input=_build_input(texts),
+        input=_build_merge_input(per_file_results),
         text_format=LLMExtraction,
     )
     if response.output_parsed is None:
@@ -129,10 +311,9 @@ def _extract_batch(client: Any, model: str, texts: list[tuple[str, str]]) -> dic
     return response.output_parsed.model_dump(mode="json")
 
 
-def _merge_partials(partials: list[dict[str, Any]]) -> dict[str, Any]:
-    """First non-null value wins per field."""
+def _first_non_null_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
+    """Simple deterministic fallback: first non-null value wins per field."""
     merged: dict[str, Any] = {}
-
     for partial in partials:
         for section_key, section_value in partial.items():
             if section_key == "observacoes":
@@ -144,42 +325,51 @@ def _merge_partials(partials: list[dict[str, Any]]) -> dict[str, Any]:
             for field_key, field_value in section_value.items():
                 if merged[section_key].get(field_key) is None and field_value is not None:
                     merged[section_key][field_key] = field_value
-
     return merged
 
 
 def extract_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
-    """Run hybrid extraction: text already extracted by PyMuPDF, GPT interprets."""
+    """Vision-first extraction: send page images + text to GPT for structured extraction."""
     if not is_llm_extraction_enabled():
         logger.debug("LLM extraction disabled, skipping")
         return {}
 
-    file_texts = [
-        (sf.original_filename, sf.extracted_text)
-        for sf in source_files
-        if sf.extracted_text.strip()
+    usable_files = [
+        sf for sf in source_files
+        if sf.extracted_text.strip() or sf.page_images
     ]
-    if not file_texts:
-        logger.info("No extractable text in source files, skipping LLM")
+    if not usable_files:
+        logger.info("No extractable content in source files, skipping LLM")
         return {}
 
     client = _get_client()
     model = _get_model()
-
-    batches = [file_texts[i:i + BATCH_SIZE] for i in range(0, len(file_texts), BATCH_SIZE)]
-    logger.info("LLM extraction: model=%s, files=%d, batches=%d", model, len(file_texts), len(batches))
+    logger.info(
+        "LLM vision extraction: model=%s, files=%d",
+        model, len(usable_files),
+    )
 
     t0 = time.monotonic()
-    partials: list[dict[str, Any]] = []
+    per_file_results: list[tuple[str, dict[str, Any]]] = []
 
-    for idx, batch in enumerate(batches):
-        if idx > 0:
-            time.sleep(RATE_LIMIT_WAIT_SECONDS)
-        partials.append(_extract_batch(client, model, batch))
+    for sf in usable_files:
+        result = _extract_single_file(client, model, sf)
+        if result:
+            per_file_results.append((sf.original_filename, result))
+            logger.info("  %s: %d fields extracted", sf.original_filename, _count_non_null_fields(result))
 
-    merged = _merge_partials(partials)
+    if not per_file_results:
+        logger.warning("LLM extraction returned no results from any file")
+        return {}
+
+    if len(per_file_results) == 1:
+        merged = per_file_results[0][1]
+    else:
+        logger.info("Merging %d per-file extractions with LLM", len(per_file_results))
+        merged = _merge_with_llm(client, model, per_file_results)
+
+    merged.pop("observacoes", None)
     elapsed = time.monotonic() - t0
-    field_count = sum(len(s) for s in merged.values() if isinstance(s, dict))
-    logger.info("LLM extraction complete: fields=%d, elapsed=%.1fs", field_count, elapsed)
+    logger.info("LLM extraction complete: fields=%d, elapsed=%.1fs", _count_non_null_fields(merged), elapsed)
 
     return merged

@@ -76,6 +76,9 @@ class ProjectExtractorTests(unittest.TestCase):
 
             self.assertIn("Entrada de energia", result.raw_text)
             self.assertTrue(result.signals["has_pdf"])
+            self.assertEqual(len(result.source_files), 1)
+            self.assertEqual(len(result.source_files[0].page_images), 1)
+            self.assertTrue(result.source_files[0].page_images[0].startswith("data:image/png;base64,"))
 
     def test_extract_project_files_raises_for_corrupted_docx(self) -> None:
         with TemporaryDirectory() as temp_dir:

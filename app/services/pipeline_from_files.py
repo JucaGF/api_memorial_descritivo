@@ -17,7 +17,7 @@ from app.services.file_ingestion import (
     cleanup_ingestion_result,
     ingest_uploaded_files,
 )
-from app.services.llm_extractor import extract_with_llm
+from app.services.llm_extractor import extract_with_llm, is_llm_extraction_enabled
 from app.services.memorial_validator import MemorialValidationError
 from app.services.pipeline import PipelineResult, generate_memorial_eletrico_v1
 from app.services.project_extractor import extract_project_files
@@ -43,16 +43,43 @@ def _fill_gaps(base: dict[str, Any], supplement: dict[str, Any]) -> dict[str, An
     return filled
 
 
-def extract_mapping_from_ingested_files(
+def _extract_llm_primary(
     files: list[IngestedFileMetadata],
 ) -> tuple[MappingResult, ExtractionReport]:
-    return _extract_and_combine(files)
+    """LLM vision is the primary extractor; mapper supplements remaining gaps."""
+    extraction_result = extract_project_files(files)
+
+    llm_context = extract_with_llm(extraction_result.source_files)
+    llm_fields = sum(
+        1 for section in llm_context.values()
+        if isinstance(section, dict)
+        for v in section.values()
+        if v is not None
+    )
+    logger.info("LLM primary extracted %d fields from %d files", llm_fields, len(files))
+
+    mapper_mapping = map_extraction_to_partial_context(extraction_result)
+    gap_fills = _fill_gaps(llm_context, mapper_mapping.context)
+    if gap_fills:
+        gap_count = sum(len(s) for s in gap_fills.values() if isinstance(s, dict))
+        logger.info("Mapper supplemented %d additional fields", gap_count)
+        final_context = merge_context(llm_context, gap_fills)
+    else:
+        final_context = llm_context
+
+    mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
+    report = assess_extraction_coverage(mapping)
+    logger.info(
+        "Extraction coverage: filled=%d, missing=%d, pending=%d",
+        len(report.filled), len(report.missing), len(report.pending),
+    )
+    return mapping, report
 
 
-def _extract_and_combine(
+def _extract_mapper_only(
     files: list[IngestedFileMetadata],
 ) -> tuple[MappingResult, ExtractionReport]:
-    """Shared extraction logic: mapper first, LLM fills gaps."""
+    """Deterministic mapper extraction (fallback when LLM is disabled)."""
     extraction_result = extract_project_files(files)
     mapping = map_extraction_to_partial_context(extraction_result)
 
@@ -60,15 +87,6 @@ def _extract_and_combine(
         len(s) for s in mapping.context.values() if isinstance(s, dict)
     )
     logger.info("Mapper extracted %d fields from %d files", mapper_fields, len(files))
-
-    llm_context = extract_with_llm(extraction_result.source_files)
-    if llm_context:
-        gap_fills = _fill_gaps(mapping.context, llm_context)
-        if gap_fills:
-            llm_filled = sum(len(s) for s in gap_fills.values() if isinstance(s, dict))
-            logger.info("LLM filled %d gap fields", llm_filled)
-            merged = merge_context(mapping.context, gap_fills)
-            mapping = MappingResult(context=merged, evidence=mapping.evidence)
 
     report = assess_extraction_coverage(mapping)
     logger.info(
@@ -78,11 +96,19 @@ def _extract_and_combine(
     return mapping, report
 
 
+def extract_mapping_from_ingested_files(
+    files: list[IngestedFileMetadata],
+) -> tuple[MappingResult, ExtractionReport]:
+    if is_llm_extraction_enabled():
+        return _extract_llm_primary(files)
+    return _extract_mapper_only(files)
+
+
 def generate_memorial_eletrico_v1_from_ingested_files(
     files: list[IngestedFileMetadata],
     output_path: Path,
 ) -> PipelineResult:
-    mapping, report = _extract_and_combine(files)
+    mapping, report = extract_mapping_from_ingested_files(files)
 
     try:
         result = generate_memorial_eletrico_v1(mapping.context, output_path)
@@ -93,6 +119,7 @@ def generate_memorial_eletrico_v1_from_ingested_files(
         )
     except MemorialValidationError as error:
         from dataclasses import asdict
+
         raise MemorialValidationError(
             issues=error.issues,
             extraction_report=asdict(report),

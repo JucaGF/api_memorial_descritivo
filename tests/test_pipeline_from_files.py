@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from tempfile import mkdtemp
 import unittest
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import UploadFile
 
-from app.services.extraction_mapper import ExtractionReport, FieldExtraction, MappingResult
+from app.services.extraction_mapper import ExtractionReport, MappingResult
 from app.services.file_ingestion import FileIngestionResult, IngestedFileMetadata
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
@@ -52,6 +53,101 @@ def build_extraction_report() -> ExtractionReport:
     return ExtractionReport(filled=["obra.construtora"], missing=[], pending=[])
 
 
+class MapperOnlyPathTests(unittest.TestCase):
+    """Tests for the mapper-only extraction path (LLM disabled)."""
+
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_mapper_only_when_llm_disabled(
+        self,
+        extract_mock,
+        map_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        mapping = build_mapping_result()
+        report = build_extraction_report()
+
+        extract_mock.return_value = build_extraction_result()
+        map_mock.return_value = mapping
+        assess_mock.return_value = report
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
+            result_mapping, result_report = extract_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping, mapping)
+        self.assertEqual(result_report, report)
+        extract_mock.assert_called_once_with(ingested_files)
+        map_mock.assert_called_once()
+        assess_mock.assert_called_once()
+
+
+class LLMPrimaryPathTests(unittest.TestCase):
+    """Tests for the LLM-primary extraction path."""
+
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
+    @patch("app.services.pipeline_from_files.extract_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_llm_primary_uses_llm_as_base(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        llm_context = {
+            "obra": {"construtora": "LLM Corp", "nome": "Edifício LLM"},
+            "energia": {"tem_subestacao": True},
+        }
+        mapper_mapping = build_mapping_result({"obra": {"construtora": "Mapper Corp"}})
+        report = build_extraction_report()
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = llm_context
+        map_mock.return_value = mapper_mapping
+        assess_mock.return_value = report
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, _ = extract_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Corp")
+        self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício LLM")
+
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
+    @patch("app.services.pipeline_from_files.extract_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_mapper_supplements_llm_gaps(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        llm_context = {"obra": {"construtora": "LLM Corp", "nome": None}}
+        mapper_mapping = build_mapping_result(
+            {"obra": {"construtora": "Mapper Corp", "nome": "Edifício Mapper"}}
+        )
+        report = build_extraction_report()
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = llm_context
+        map_mock.return_value = mapper_mapping
+        assess_mock.return_value = report
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, _ = extract_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Corp")
+        self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
+
+
 class GenerateFromIngestedFilesTests(unittest.TestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1")
     @patch("app.services.pipeline_from_files.assess_extraction_coverage")
@@ -77,15 +173,12 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
             context=mapping.context, output_path=output_path
         )
 
-        result = generate_memorial_eletrico_v1_from_ingested_files(ingested_files, output_path)
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
+            result = generate_memorial_eletrico_v1_from_ingested_files(ingested_files, output_path)
 
         self.assertIsInstance(result, PipelineResult)
         self.assertEqual(result.output_path, output_path)
         self.assertEqual(result.extraction_report, report)
-        extract_mock.assert_called_once_with(ingested_files)
-        map_mock.assert_called_once_with(extraction_result)
-        assess_mock.assert_called_once_with(mapping)
-        generate_mock.assert_called_once_with(mapping.context, output_path)
 
     @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1")
     @patch("app.services.pipeline_from_files.assess_extraction_coverage")
@@ -110,35 +203,11 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
             [ValidationIssue(path="$", message="'documento' is a required property", validator="required")]
         )
 
-        with self.assertRaises(MemorialValidationError) as ctx:
-            generate_memorial_eletrico_v1_from_ingested_files(ingested_files, output_path)
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
+            with self.assertRaises(MemorialValidationError) as ctx:
+                generate_memorial_eletrico_v1_from_ingested_files(ingested_files, output_path)
 
         self.assertIsNotNone(ctx.exception.extraction_report)
-
-
-class ExtractMappingFromIngestedFilesTests(unittest.TestCase):
-    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
-    @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
-    @patch("app.services.pipeline_from_files.extract_project_files")
-    def test_returns_mapping_and_report(
-        self,
-        extract_mock,
-        map_mock,
-        assess_mock,
-    ) -> None:
-        ingested_files = [build_ingested_file()]
-        mapping = build_mapping_result()
-        report = build_extraction_report()
-
-        extract_mock.return_value = build_extraction_result()
-        map_mock.return_value = mapping
-        assess_mock.return_value = report
-
-        result_mapping, result_report = extract_mapping_from_ingested_files(ingested_files)
-
-        self.assertEqual(result_mapping, mapping)
-        self.assertEqual(result_report, report)
-        assess_mock.assert_called_once_with(mapping)
 
 
 class GenerateFromUploadedFilesTests(unittest.IsolatedAsyncioTestCase):

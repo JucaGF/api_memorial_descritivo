@@ -1,165 +1,111 @@
 from __future__ import annotations
 
 """
-Extração híbrida: PyMuPDF extrai texto, GPT interpreta.
+Vision-first extraction: page images + OCR text sent to GPT for structured extraction.
 
-Uso:
-  python scripts/llm_extract_eletrico_poc.py *.pdf --output resultado.json
-  python scripts/llm_extract_eletrico_poc.py *.pdf --model gpt-4.1
+Usage:
+  python scripts/llm_extract_eletrico_poc.py projects/eletrico/*.pdf
+  python scripts/llm_extract_eletrico_poc.py projects/eletrico/*.pdf --output tests/output/vision_extract.json
+  python scripts/llm_extract_eletrico_poc.py projects/eletrico/*.pdf --model gpt-5.4
 
-Fluxo:
-  1. PyMuPDF extrai texto de todos os PDFs
-  2. GPT recebe o texto em lotes e extrai campos estruturados
-  3. Resultados parciais são consolidados em um único JSON
+Pipeline:
+  1. PyMuPDF extracts text + renders page images from each PDF
+  2. GPT receives images + text per file and returns structured extraction
+  3. When multiple files, a second GPT pass merges per-file results
+  4. Mapper supplements any remaining gaps
+  5. Coverage report shows filled/missing/pending fields
 """
 
 import argparse
 import json
+import logging
 import os
 import sys
-import time
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
+os.environ["USE_LLM_EXTRACTION"] = "true"
+sys.path.insert(0, str(ROOT))
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app.services.llm_extractor import (  # noqa: E402
-    PROMPT,
-    LLMExtraction,
-    _build_input,
-    _merge_partials,
-)
-
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
-DEFAULT_BATCH_SIZE = 2
+from app.services.file_ingestion import IngestedFileMetadata  # noqa: E402
+from app.services.pipeline_from_files import extract_mapping_from_ingested_files  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extração híbrida: PyMuPDF + GPT para memorial elétrico."
+        description="Vision-first extraction for memorial eletrico.",
     )
-    parser.add_argument("pdfs", nargs="+", help="Caminhos locais para PDFs.")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Modelo OpenAI (default: {DEFAULT_MODEL}).")
-    parser.add_argument("--output", type=Path, help="Caminho para salvar o JSON final.")
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help=f"PDFs por lote (default: {DEFAULT_BATCH_SIZE}).")
+    parser.add_argument("pdfs", nargs="+", help="PDF file paths.")
+    parser.add_argument("--model", help="Override OPENAI_MODEL env var.")
+    parser.add_argument("--output", type=Path, help="Save extraction JSON to this path.")
+    parser.add_argument("--report", action="store_true", help="Print coverage report.")
     return parser.parse_args()
 
 
-def validate_pdf_paths(paths: list[str]) -> list[Path]:
-    validated: list[Path] = []
+def validate_and_build_files(paths: list[str]) -> list[IngestedFileMetadata]:
+    files: list[IngestedFileMetadata] = []
     for raw_path in paths:
         path = Path(raw_path).expanduser().resolve()
         if not path.exists():
-            raise FileNotFoundError(f"PDF nao encontrado: {path}")
+            raise FileNotFoundError(f"PDF not found: {path}")
         if path.suffix.lower() != ".pdf":
-            raise ValueError(f"Arquivo nao e PDF: {path}")
-        validated.append(path)
-    return validated
-
-
-def extract_text_from_pdf(pdf_path: Path) -> str:
-    import fitz
-    doc = fitz.open(str(pdf_path))
-    pages: list[str] = []
-    for page in doc:
-        text = page.get_text()
-        if text.strip():
-            pages.append(text)
-    doc.close()
-    return "\n\n".join(pages)
-
-
-def extract_all_texts(pdf_paths: list[Path]) -> list[tuple[str, str]]:
-    results: list[tuple[str, str]] = []
-    for pdf_path in pdf_paths:
-        print(f"  Extraindo texto: {pdf_path.name}...", file=sys.stderr)
-        text = extract_text_from_pdf(pdf_path)
-        print(f"    -> {len(text)} caracteres", file=sys.stderr)
-        results.append((pdf_path.name, text))
-    return results
-
-
-def run_batch_extraction(
-    client: Any,
-    model: str,
-    file_texts: list[tuple[str, str]],
-) -> dict[str, Any]:
-    filenames = [ft[0] for ft in file_texts]
-    print(f"  GPT processando: {', '.join(filenames)}...", file=sys.stderr)
-
-    response = client.responses.parse(
-        model=model,
-        input=_build_input(file_texts),
-        text_format=LLMExtraction,
-    )
-    if response.output_parsed is None:
-        raise RuntimeError("A API retornou resposta sem output estruturado.")
-    return response.output_parsed.model_dump(mode="json")
-
-
-def merge_extractions(partials: list[dict[str, Any]]) -> dict[str, Any]:
-    """Wrapper that also collects observacoes from partials."""
-    observations: list[str] = []
-    for partial in partials:
-        obs = partial.get("observacoes")
-        if obs:
-            observations.append(obs)
-
-    merged = _merge_partials(partials)
-    if observations:
-        merged["observacoes"] = " | ".join(observations)
-    return merged
+            raise ValueError(f"Not a PDF: {path}")
+        files.append(IngestedFileMetadata(
+            original_filename=path.name,
+            stored_filename=path.name,
+            content_type="application/pdf",
+            extension=".pdf",
+            size_bytes=path.stat().st_size,
+            saved_path=str(path),
+        ))
+    return files
 
 
 def main() -> int:
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    if args.model:
+        os.environ["OPENAI_MODEL"] = args.model
 
     try:
-        pdf_paths = validate_pdf_paths(args.pdfs)
+        files = validate_and_build_files(args.pdfs)
+        print(f"\nExtracting from {len(files)} PDFs...", file=sys.stderr)
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise EnvironmentError("OPENAI_API_KEY nao encontrado no ambiente.")
+        mapping, report = extract_mapping_from_ingested_files(files)
 
-        print(f"\n[1/3] Extraindo texto de {len(pdf_paths)} PDFs com PyMuPDF...", file=sys.stderr)
-        all_texts = extract_all_texts(pdf_paths)
-
-        from openai import OpenAI
-        client = OpenAI()
-
-        batches = [
-            all_texts[i:i + args.batch_size]
-            for i in range(0, len(all_texts), args.batch_size)
-        ]
-
-        print(f"\n[2/3] Enviando {len(batches)} lotes ao GPT ({args.model})...", file=sys.stderr)
-        partials: list[dict[str, Any]] = []
-        for idx, batch in enumerate(batches, 1):
-            if idx > 1:
-                wait = 30
-                print(f"\n  Aguardando {wait}s (rate limit)...", file=sys.stderr)
-                time.sleep(wait)
-            print(f"\n  Lote {idx}/{len(batches)}:", file=sys.stderr)
-            partials.append(run_batch_extraction(client, args.model, batch))
-
-        print(f"\n[3/3] Merge de {len(partials)} resultados parciais...", file=sys.stderr)
-        final = merge_extractions(partials)
-
-        rendered = json.dumps(final, ensure_ascii=False, indent=2)
+        rendered = json.dumps(mapping.context, ensure_ascii=False, indent=2)
         print(rendered)
+
+        if args.report:
+            print(f"\n--- Coverage Report ---", file=sys.stderr)
+            print(f"Filled ({len(report.filled)}): {report.filled}", file=sys.stderr)
+            print(f"Missing ({len(report.missing)}): {report.missing}", file=sys.stderr)
+            print(f"Pending ({len(report.pending)}): {report.pending}", file=sys.stderr)
 
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(rendered + "\n", encoding="utf-8")
-            print(f"\nSalvo em: {args.output}", file=sys.stderr)
+            output_data = {
+                "context": mapping.context,
+                "report": asdict(report),
+            }
+            args.output.write_text(
+                json.dumps(output_data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(f"\nSaved to: {args.output}", file=sys.stderr)
 
         return 0
     except Exception as error:
-        print(f"Erro: {error}", file=sys.stderr)
+        logging.exception("Extraction failed")
         return 1
 
 

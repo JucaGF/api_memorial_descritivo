@@ -496,10 +496,19 @@ def assess_extraction_coverage(mapping: MappingResult) -> ExtractionReport:
             filled.append(field_path)
         else:
             missing.append(field_path)
+
+    pending = []
+    for field_path in PENDING_EXTRACTION:
+        value = _get_nested_value(mapping.context, field_path)
+        if value is not None:
+            filled.append(field_path)
+        else:
+            pending.append(field_path)
+
     return ExtractionReport(
         filled=filled,
         missing=missing,
-        pending=list(PENDING_EXTRACTION),
+        pending=pending,
         evidence=mapping.evidence,
     )
 
