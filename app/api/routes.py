@@ -211,8 +211,16 @@ async def create_review_session(
     except FileIngestionError as error:
         return JSONResponse(status_code=400, content={"detail": error.detail})
 
-    session_id = create_session()
-    background_tasks.add_task(_process_review_session, session_id, ingestion_result)
+    session_id: str | None = None
+    try:
+        session_id = create_session()
+        background_tasks.add_task(_process_review_session, session_id, ingestion_result)
+    except Exception:
+        cleanup_ingestion_result(ingestion_result)
+        if session_id is not None:
+            delete_session(session_id)
+        raise
+
     return SessionCreatedResponse(session_id=session_id, status="processing")
 
 

@@ -40,6 +40,14 @@ def _ensure_dir() -> None:
     _sessions_dir().mkdir(parents=True, exist_ok=True)
 
 
+def _parse_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def _is_session_expired(session: ReviewSession) -> bool:
+    return _parse_datetime(session.expires_at) <= datetime.now(tz=timezone.utc)
+
+
 def create_session() -> str:
     _ensure_dir()
     session_id = str(uuid.uuid4())
@@ -62,7 +70,11 @@ def load_session(session_id: str) -> ReviewSession | None:
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    return ReviewSession(**data)
+    session = ReviewSession(**data)
+    if _is_session_expired(session):
+        path.unlink(missing_ok=True)
+        return None
+    return session
 
 
 def save_session(session: ReviewSession) -> None:

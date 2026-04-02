@@ -91,6 +91,17 @@ class SupabaseSessionStoreTests(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    @patch("app.services.supabase_session_store.delete_session")
+    def test_load_session_returns_none_and_deletes_when_expired(self, delete_mock) -> None:
+        expired = _session_data("abc-123", "pending_review")
+        expired["expires_at"] = (datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat()
+        self._table().select.return_value.eq.return_value.execute.return_value = _mock_response([expired])
+
+        result = store.load_session("abc-123")
+
+        self.assertIsNone(result)
+        delete_mock.assert_called_once_with("abc-123")
+
     def test_load_session_queries_correct_table_and_field(self) -> None:
         self._table().select.return_value.eq.return_value.execute.return_value = _mock_response([])
 
@@ -130,6 +141,18 @@ class SupabaseSessionStoreTests(unittest.TestCase):
         result = store.update_session("nao-existe", status="failed")
 
         self.assertIsNone(result)
+        self._table().update.assert_not_called()
+
+    @patch("app.services.supabase_session_store.delete_session")
+    def test_update_session_returns_none_for_expired_session(self, delete_mock) -> None:
+        expired = _session_data("abc-123", "pending_review")
+        expired["expires_at"] = (datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat()
+        self._table().select.return_value.eq.return_value.execute.return_value = _mock_response([expired])
+
+        result = store.update_session("abc-123", status="failed")
+
+        self.assertIsNone(result)
+        delete_mock.assert_called_once_with("abc-123")
         self._table().update.assert_not_called()
 
     # ── delete_session ────────────────────────────────────────────────────────

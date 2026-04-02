@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -65,6 +65,34 @@ class SessionStoreTests(unittest.TestCase):
 
         self.assertEqual(session.session_id, session_id)
 
+    def test_load_session_returns_none_for_expired_session(self) -> None:
+        session_id = "expired-session"
+        expired_session = self._store.ReviewSession(
+            session_id=session_id,
+            status=self._store.STATUS_PENDING_REVIEW,
+            created_at=(datetime.now(tz=timezone.utc) - timedelta(days=2)).isoformat(),
+            expires_at=(datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat(),
+        )
+        self._store.save_session(expired_session)
+
+        loaded = self._store.load_session(session_id)
+
+        self.assertIsNone(loaded)
+
+    def test_load_session_removes_expired_session_file(self) -> None:
+        session_id = "expired-session"
+        expired_session = self._store.ReviewSession(
+            session_id=session_id,
+            status=self._store.STATUS_PENDING_REVIEW,
+            created_at=(datetime.now(tz=timezone.utc) - timedelta(days=2)).isoformat(),
+            expires_at=(datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat(),
+        )
+        self._store.save_session(expired_session)
+
+        self._store.load_session(session_id)
+
+        self.assertFalse((self._sessions_path / f"{session_id}.json").exists())
+
     def test_update_session_changes_specified_fields(self) -> None:
         session_id = self._store.create_session()
 
@@ -98,6 +126,21 @@ class SessionStoreTests(unittest.TestCase):
         result = self._store.update_session("nao-existe", status="failed")
 
         self.assertIsNone(result)
+
+    def test_update_session_returns_none_for_expired_session(self) -> None:
+        session_id = "expired-session"
+        expired_session = self._store.ReviewSession(
+            session_id=session_id,
+            status=self._store.STATUS_PENDING_REVIEW,
+            created_at=(datetime.now(tz=timezone.utc) - timedelta(days=2)).isoformat(),
+            expires_at=(datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat(),
+        )
+        self._store.save_session(expired_session)
+
+        updated = self._store.update_session(session_id, status=self._store.STATUS_FAILED)
+
+        self.assertIsNone(updated)
+        self.assertFalse((self._sessions_path / f"{session_id}.json").exists())
 
     def test_delete_session_removes_file(self) -> None:
         session_id = self._store.create_session()

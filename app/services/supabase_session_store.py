@@ -8,7 +8,12 @@ from typing import Any
 
 # Imports from session_store are safe here: this module is only imported at the
 # bottom of session_store.py, after ReviewSession and constants are already defined.
-from app.services.session_store import ReviewSession, _SESSION_TTL, STATUS_PROCESSING
+from app.services.session_store import (
+    ReviewSession,
+    _SESSION_TTL,
+    STATUS_PROCESSING,
+    _is_session_expired,
+)
 
 _client_instance: Any = None
 
@@ -50,7 +55,11 @@ def load_session(session_id: str) -> ReviewSession | None:
     )
     if not response.data:
         return None
-    return ReviewSession(**response.data[0])
+    session = ReviewSession(**response.data[0])
+    if _is_session_expired(session):
+        delete_session(session_id)
+        return None
+    return session
 
 
 def save_session(session: ReviewSession) -> None:
