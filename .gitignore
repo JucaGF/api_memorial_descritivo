@@ -18,7 +18,13 @@ env/
 .coverage
 
 # Outputs gerados pelos testes
+# Ignore everything in tests/output
 tests/output/
+
+
+
+
+
 
 # Sessões filesystem (runtime)
 sessions/
