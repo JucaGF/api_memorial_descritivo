@@ -12,8 +12,8 @@
     "qtd_apartamentos": 40,
     "qtd_lojas": 2,
     "qtd_restaurantes": 1,
-    "porcentagem_entre_trafos": "1%",
-    "porcentagem_entre_quadros": "2%"
+    "porcentagem_entre_trafos": "2%",
+    "porcentagem_entre_quadros": "3%"
   },
   "energia": {
     "tem_subestacao": false,
