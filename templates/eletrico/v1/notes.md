@@ -28,12 +28,13 @@ Os placeholders são organizados por domínio:
 - O documento final não deve conter tags Jinja visíveis.
 - O documento final não deve conter observações internas.
 - A numeração das seções está fixa no texto.
-- O sumário atual é manual/estático.
+- O sumário é manual/estático, exceto as entradas 4.2 e 4.2.1 que são condicionais (controladas por `energia.tem_subestacao`).
 - O comportamento da seção 4.4 será ignorado nesta versão.
 
 ## Seções condicionais
 ### `energia.tem_subestacao`
 Controla:
+- entradas 4.2 e 4.2.1 no sumário
 - texto alternativo da seção 4.1
 - exibição da seção 4.2
 - exibição da seção 4.2.1

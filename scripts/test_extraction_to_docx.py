@@ -35,6 +35,7 @@ from app.services.pipeline_from_files import extract_mapping_from_ingested_files
 DEFAULT_PDFS = [
     "projects/eletrico/MGAMAK_EL_E-1.0_SUBSOLO_V08.pdf",
     "projects/eletrico/MGAMAK_EL_E-1.1_QUADROS E DIAGRAMAS_V08.pdf",
+    "projects/eletrico/MGAMAK_EL_E-6.0_ENERGISA_V01.pdf",
 ]
 DEFAULT_OUTPUT = "tests/output/makai_from_extraction.docx"
 
