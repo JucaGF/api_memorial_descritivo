@@ -23,9 +23,13 @@ from app.services.file_ingestion import (
 )
 from app.services.memorial_renderer import MemorialRenderError
 from app.services.memorial_validator import MemorialValidationError
-from app.services.pipeline import generate_memorial_eletrico_v1
+from app.services.pipeline import (
+    generate_memorial_eletrico_v1,
+    generate_memorial_telecom_v1,
+)
 from app.services.pipeline_from_files import (
     extract_mapping_from_ingested_files,
+    generate_memorial_telecom_v1_from_uploaded_files,
     generate_memorial_eletrico_v1_from_uploaded_files,
 )
 from app.services.project_extractor import ProjectExtractionError
@@ -54,9 +58,12 @@ def _remove_file(path: Path) -> None:
         return
 
 
-def _validation_error_response(error: MemorialValidationError) -> JSONResponse:
+def _validation_error_response(
+    error: MemorialValidationError,
+    detail: str,
+) -> JSONResponse:
     content: dict = {
-        "detail": "Payload invalido para o memorial eletrico v1.",
+        "detail": detail,
         "errors": [
             {
                 "path": issue.path,
@@ -74,12 +81,13 @@ def _validation_error_response(error: MemorialValidationError) -> JSONResponse:
 def _docx_file_response(
     output_path: Path,
     background_tasks: BackgroundTasks,
+    filename: str,
 ) -> FileResponse:
     background_tasks.add_task(_remove_file, output_path)
     return FileResponse(
         path=output_path,
         media_type=DOCX_MEDIA_TYPE,
-        filename="memorial_eletrico_v1.docx",
+        filename=filename,
     )
 
 
@@ -111,7 +119,7 @@ def create_memorial_eletrico(
         generate_memorial_eletrico_v1(payload, output_path)
     except MemorialValidationError as error:
         _remove_file(output_path)
-        return _validation_error_response(error)
+        return _validation_error_response(error, "Payload invalido para o memorial eletrico v1.")
     except MemorialRenderError as error:
         _remove_file(output_path)
         return JSONResponse(
@@ -122,7 +130,33 @@ def create_memorial_eletrico(
             },
         )
 
-    return _docx_file_response(output_path, background_tasks)
+    return _docx_file_response(output_path, background_tasks, "memorial_eletrico_v1.docx")
+
+
+@router.post("/api/v1/memoriais/telecom")
+def create_memorial_telecom(
+    payload: dict[str, Any],
+    background_tasks: BackgroundTasks,
+):
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        generate_memorial_telecom_v1(payload, output_path)
+    except MemorialValidationError as error:
+        _remove_file(output_path)
+        return _validation_error_response(error, "Payload invalido para o memorial telecom v1.")
+    except MemorialRenderError as error:
+        _remove_file(output_path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Falha ao renderizar o memorial telecom v1.",
+                "error": str(error),
+            },
+        )
+
+    return _docx_file_response(output_path, background_tasks, "memorial_telecom_v1.docx")
 
 
 @router.post(
@@ -130,6 +164,28 @@ def create_memorial_eletrico(
     response_model=FileIngestionResponse,
 )
 async def upload_memorial_eletrico_files(
+    files: list[UploadFile] | None = File(default=None),
+):
+    result = None
+    try:
+        result = await ingest_uploaded_files(files or [])
+    except FileIngestionError as error:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": error.detail},
+        )
+    finally:
+        if result is not None:
+            cleanup_ingestion_result(result)
+
+    return _file_ingestion_response(result)
+
+
+@router.post(
+    "/api/v1/memoriais/telecom/upload",
+    response_model=FileIngestionResponse,
+)
+async def upload_memorial_telecom_files(
     files: list[UploadFile] | None = File(default=None),
 ):
     result = None
@@ -179,7 +235,7 @@ async def create_memorial_eletrico_from_files(
         await generate_memorial_eletrico_v1_from_uploaded_files(files or [], output_path)
     except MemorialValidationError as error:
         _remove_file(output_path)
-        return _validation_error_response(error)
+        return _validation_error_response(error, "Payload invalido para o memorial eletrico v1.")
     except (FileIngestionError, ProjectExtractionError) as error:
         _remove_file(output_path)
         return JSONResponse(
@@ -196,7 +252,39 @@ async def create_memorial_eletrico_from_files(
             },
         )
 
-    return _docx_file_response(output_path, background_tasks)
+    return _docx_file_response(output_path, background_tasks, "memorial_eletrico_v1.docx")
+
+
+@router.post("/api/v1/memoriais/telecom/from-files")
+async def create_memorial_telecom_from_files(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] | None = File(default=None),
+):
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        await generate_memorial_telecom_v1_from_uploaded_files(files or [], output_path)
+    except MemorialValidationError as error:
+        _remove_file(output_path)
+        return _validation_error_response(error, "Payload invalido para o memorial telecom v1.")
+    except (FileIngestionError, ProjectExtractionError) as error:
+        _remove_file(output_path)
+        return JSONResponse(
+            status_code=400,
+            content={"detail": str(error)},
+        )
+    except MemorialRenderError as error:
+        _remove_file(output_path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Falha ao renderizar o memorial telecom v1.",
+                "error": str(error),
+            },
+        )
+
+    return _docx_file_response(output_path, background_tasks, "memorial_telecom_v1.docx")
 
 
 # ── Fluxo de revisão manual ──────────────────────────────────────────────────
@@ -276,7 +364,7 @@ def generate_from_review_session(session_id: str, background_tasks: BackgroundTa
         generate_memorial_eletrico_v1(merged, output_path)
     except MemorialValidationError as error:
         _remove_file(output_path)
-        return _validation_error_response(error)
+        return _validation_error_response(error, "Payload invalido para o memorial eletrico v1.")
     except MemorialRenderError as error:
         _remove_file(output_path)
         return JSONResponse(
@@ -285,4 +373,4 @@ def generate_from_review_session(session_id: str, background_tasks: BackgroundTa
         )
 
     background_tasks.add_task(delete_session, session_id)
-    return _docx_file_response(output_path, background_tasks)
+    return _docx_file_response(output_path, background_tasks, "memorial_eletrico_v1.docx")

@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 import unittest
 
-from app.services.context_builder import build_memorial_eletrico_v1_context, merge_context
+from app.services.context_builder import (
+    build_memorial_eletrico_v1_context,
+    build_memorial_telecom_v1_context,
+    merge_context,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,6 +65,24 @@ class ContextBuilderTests(unittest.TestCase):
 
         self.assertFalse(payload["nao_inclusos"]["tem_itens"])
         self.assertTrue(context["nao_inclusos"]["tem_itens"])
+
+    def test_telecom_fills_documento_data_atual_when_missing(self) -> None:
+        payload = load_fixture("telecom_base.json")
+        del payload["documento"]["data_atual"]
+
+        context = build_memorial_telecom_v1_context(payload)
+
+        self.assertIn("data_atual", context["documento"])
+        self.assertTrue(context["documento"]["data_atual"])
+
+    def test_telecom_does_not_mutate_original_input_payload(self) -> None:
+        payload = load_fixture("telecom_base.json")
+        del payload["documento"]["data_atual"]
+
+        context = build_memorial_telecom_v1_context(payload)
+
+        self.assertNotIn("data_atual", payload["documento"])
+        self.assertIn("data_atual", context["documento"])
 
 
 class MergeContextTests(unittest.TestCase):

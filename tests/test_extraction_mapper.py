@@ -7,7 +7,9 @@ from app.services.extraction_mapper import (
     FieldExtraction,
     MappingResult,
     assess_extraction_coverage,
+    assess_telecom_extraction_coverage,
     map_extraction_to_partial_context,
+    map_extraction_to_partial_telecom_context,
 )
 from app.services.project_extractor import ExtractedSourceFile, ProjectExtractionResult
 
@@ -55,6 +57,78 @@ Alimentação em média tensão 15 kV.
 Subestação abrigada abaixadora com medição em MT.
 Sistema de aterramento TN-S.
 Seção do cabo de média tensão: 35 mm².
+"""
+
+REAL_TELECOM_CARIMBO_TEXT = """
+DESCRIÇÃO DA MODIFICAÇÃO
+QUADRO DE CONTROLE DE PROJETO
+DATA
+VERSÃO
+engpred@gmail.com
+(83)3566-0770 (83)98755-0770
+ENG. EVANDRO CESAR
+CREA - 16.03.55.76.10
+LOCAL:
+Escala:
+CONSTRUTOR:
+EDIFÍCIO:
+PROJETO:
+Desenho :
+PROJETO Nº:
+INDICADAS
+DATA:
+Projeto
+Proprietário
+Construtor
+É EXPRESSAMENTE PROIBIDO A REPRODUÇÃO TOTAL OU PARCIAL DESTE PROJETO
+MAKAI
+MGA CONSTRUÇÕES E INCORPORAÇÕES LTDA
+AVENIDA MAX ZAGEL, S/N, LOTE 05-A QUADRA12, CABEDELO- PB
+PROJETO DE INSTALAÇÕES DE TELECOMUNICAÇÃO
+23/2024
+SUBSOLO
+TÉRREO
+PAV. 01
+PAV. 02
+PAV. 03
+PAV. 04
+PAV. 05
+PAV. 06
+PAV. 07
+PAV. 08
+COBERTA
+APTO 001
+APTO 101
+APTO 102
+APTO 103
+APTO 104
+APTO 201
+APTO 202
+APTO 203
+APTO 204
+APTO 301
+APTO 302
+APTO 303
+APTO 304
+APTO 401
+APTO 402
+APTO 403
+APTO 404
+APTO 501
+APTO 502
+APTO 503
+APTO 504
+APTO 601
+APTO 602
+APTO 603
+APTO 604
+APTO 701
+APTO 702
+APTO 703
+APTO 704
+APTO 801
+GOURMET SOL
+GOURMET MAR
 """
 
 
@@ -282,6 +356,41 @@ class AssessExtractionCoverageTests(unittest.TestCase):
 
         for field in ("nao_inclusos.cftv", "nao_inclusos.alarme_incendio", "nao_inclusos.automacao"):
             self.assertIn(field, report.filled)
+
+
+class TelecomExtractionMapperTests(unittest.TestCase):
+    def test_maps_only_telecom_relevant_obra_fields(self) -> None:
+        result = map_extraction_to_partial_telecom_context(build_extraction_result(CARIMBO_TEXT))
+
+        self.assertEqual(result.context["obra"]["construtora"], "MGA CONSTRUÇÕES E INCORPORAÇÕES LTDA")
+        self.assertEqual(result.context["obra"]["nome"], "MAKAI")
+        self.assertIn("CABEDELO", result.context["obra"]["localizacao"])
+        self.assertNotIn("energia", result.context)
+        self.assertNotIn("nao_inclusos", result.context)
+
+    def test_telecom_coverage_marks_base_fields_and_pending_fields(self) -> None:
+        result = map_extraction_to_partial_telecom_context(build_extraction_result(CARIMBO_TEXT))
+        report = assess_telecom_extraction_coverage(result)
+
+        self.assertIn("obra.construtora", report.filled)
+        self.assertIn("obra.tipo_edificacao", report.pending)
+        self.assertIn("obra.qtd_restaurantes", report.pending)
+
+    def test_telecom_mapper_handles_real_carimbo_and_counts(self) -> None:
+        result = map_extraction_to_partial_telecom_context(
+            build_extraction_result(REAL_TELECOM_CARIMBO_TEXT)
+        )
+        context = result.context["obra"]
+
+        self.assertEqual(context["construtora"], "MGA CONSTRUÇÕES E INCORPORAÇÕES LTDA")
+        self.assertEqual(context["nome"], "MAKAI")
+        self.assertIn("MAX ZAGEL", context["localizacao"])
+        self.assertEqual(context["numero_cadastro"], "23/2024")
+        self.assertEqual(context["tipo_edificacao"], "Residencial Multifamiliar")
+        self.assertEqual(context["qtd_apartamentos"], 30)
+        self.assertEqual(context["qtd_lojas"], 0)
+        self.assertEqual(context["qtd_restaurantes"], 0)
+        self.assertIn("pavimentos", context["tipologia"].lower())
 
 
 if __name__ == "__main__":

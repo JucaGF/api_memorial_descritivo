@@ -1,6 +1,6 @@
 # API Memorial Descritivo
 
-Sistema para geração automática de memoriais descritivos de engenharia a partir de arquivos técnicos, com foco atual no **memorial elétrico v1**.
+Sistema para geração automática de memoriais descritivos de engenharia a partir de arquivos técnicos, com foco operacional no **memorial elétrico v1** e no **memorial telecom v1**.
 
 O projeto recebe arquivos de projeto, extrai informações relevantes, monta um contexto estruturado, valida esse contexto contra o contrato do template e gera automaticamente um memorial em **DOCX**. O sistema também já possui um fluxo de **revisão manual por sessão**, permitindo corrigir o contexto antes da geração final.
 
@@ -23,7 +23,13 @@ Fluxo conceitual do sistema:
 
 # Escopo atual
 
-O escopo implementado hoje está concentrado no **memorial elétrico v1**.
+O escopo atual está dividido em duas frentes implementadas e uma próxima frente planejada:
+
+- **memorial elétrico v1**: fluxo funcional de ponta a ponta (JSON, arquivos e revisão por sessão)
+- **memorial telecom v1**: fluxo funcional de geração por JSON e por arquivos
+- **memorial gás**: próxima expansão planejada, com dois casos distintos
+  - **gás GLP**
+  - **gás natural**
 
 O sistema já possui:
 
@@ -37,11 +43,13 @@ O sistema já possui:
 - persistência opcional de sessão em Supabase
 - suíte de testes automatizados cobrindo serviços, stores, mapper e API
 
+Além disso, o próximo eixo de evolução do projeto é a implementação do memorial de gás, separado desde o início entre os cenários de **GLP** e **gás natural**.
+
 ---
 
 # Estado atual do projeto
 
-O projeto já saiu da fase de prova de conceito de template e hoje possui uma primeira base funcional de backend para geração do memorial elétrico.
+O projeto já saiu da fase de prova de conceito e hoje possui uma base funcional de backend para geração de memoriais com duas trilhas ativas: elétrico e telecom.
 
 ## O que já está implementado
 
@@ -59,13 +67,27 @@ O template usa **docxtpl** com sintaxe Jinja2 para renderização condicional.
 O `schema.json` define o contrato esperado para o contexto.
 O `notes.md` documenta decisões e observações do template.
 
-### 2. Geração por JSON
+### 2. Template e contrato do memorial telecom v1
+
+Arquivos principais:
+
+```text
+templates/telecom/v1/template.docx
+templates/telecom/v1/schema.json
+templates/telecom/v1/notes.md
+```
+
+O template de telecom usa **docxtpl** com placeholders Jinja2.
+O `schema.json` define o contrato esperado para o contexto.
+O `notes.md` documenta decisões e observações do template.
+
+### 3. Geração por JSON
 
 O sistema já aceita um contexto estruturado pronto e gera o memorial DOCX a partir dele.
 
 Esse fluxo é útil quando os dados do memorial já estão disponíveis e validados fora da etapa de extração.
 
-### 3. Ingestão e geração por arquivos
+### 4. Ingestão e geração por arquivos
 
 O backend já possui fluxo para:
 
@@ -76,7 +98,7 @@ O backend já possui fluxo para:
 - avaliar cobertura da extração
 - gerar o documento final
 
-### 4. Revisão manual por sessão
+### 5. Revisão manual por sessão
 
 O sistema já implementa um fluxo de revisão intermediária antes da geração final.
 
@@ -90,7 +112,7 @@ Esse fluxo permite:
 - fazer merge das correções com o contexto parcial
 - gerar o memorial final a partir do contexto revisado
 
-### 5. Session store
+### 6. Session store
 
 O armazenamento de sessões hoje possui duas possibilidades:
 
@@ -105,13 +127,13 @@ A sessão contém informações como:
 - correções aplicadas
 - metadados de expiração
 
-### 6. Mapper semântico de extração
+### 7. Mapper semântico de extração
 
 O projeto já possui um `extraction_mapper` com múltiplas fases de evolução, cobrindo extração por proximidade, leitura de campos rotulados, preenchimento de campos derivados e evidências por campo.
 
 Isso permite transformar a saída de extração em um contexto mais próximo do contrato real do template.
 
-### 7. Testes automatizados
+### 8. Testes automatizados
 
 A suíte de testes já vai além da renderização do template e cobre diferentes partes do backend, incluindo:
 
@@ -127,6 +149,8 @@ A suíte de testes já vai além da renderização do template e cobre diferente
 
 # Fluxos disponíveis hoje
 
+Os fluxos abaixo já existem no backend. Parte deles está disponível hoje apenas para o memorial elétrico, enquanto JSON e geração por arquivos já existem também para telecom.
+
 ## 1. Geração direta por JSON
 
 Usado quando o contexto do memorial já está pronto.
@@ -138,6 +162,11 @@ Fluxo:
 3. O template DOCX é renderizado
 4. O memorial final é retornado
 
+Status atual:
+
+- **elétrico v1**: implementado
+- **telecom v1**: implementado
+
 ## 2. Upload e ingestão de arquivos
 
 Usado quando a intenção é apenas ingerir e preparar os arquivos para etapas posteriores do pipeline.
@@ -148,6 +177,11 @@ Fluxo:
 2. Os arquivos são armazenados temporariamente
 3. O backend executa a etapa de ingestão
 4. O resultado fica disponível para o pipeline seguinte
+
+Status atual:
+
+- **elétrico v1**: implementado
+- **telecom v1**: implementado
 
 ## 3. Geração a partir de arquivos
 
@@ -161,6 +195,11 @@ Fluxo:
 4. A extração é convertida em contexto parcial
 5. O contexto é validado
 6. O memorial DOCX é gerado
+
+Status atual:
+
+- **elétrico v1**: implementado
+- **telecom v1**: implementado
 
 ## 4. Revisão manual por sessão
 
@@ -176,6 +215,11 @@ Fluxo:
 6. Geração final do memorial revisado
 
 Esse fluxo é importante porque permite manter a geração final determinística, sem depender de uma extração perfeita em todos os campos.
+
+Status atual:
+
+- **elétrico v1**: implementado
+- **telecom v1**: ainda não implementado
 
 ---
 
@@ -194,16 +238,16 @@ app/
 templates/
   eletrico/
     v1/
+  telecom/
+    v1/
 
 tests/
   fixtures/
-  output/
 
 scripts/
 
 migrations/
 
-.codex/
 AGENTS.md
 README.md
 requirements.txt
@@ -234,6 +278,10 @@ Contém a lógica de negócio do sistema, incluindo:
 ### `templates/`
 
 Contém os templates DOCX, schemas JSON e anotações de suporte para cada tipo e versão de memorial.
+No estado atual:
+
+- `eletrico/v1` possui template DOCX + schema + notas
+- `telecom/v1` possui template DOCX + schema + notas
 
 ### `tests/`
 
@@ -262,6 +310,12 @@ As rotas atuais cobrem os principais fluxos do sistema:
 - atualização de contexto de sessão
 - geração final a partir da sessão
 
+No estágio atual:
+
+- há rotas de JSON, upload e `from-files` para **elétrico**
+- há rotas de JSON, upload e `from-files` para **telecom**
+- o fluxo de **sessão de revisão** continua disponível apenas para **elétrico**
+
 ## Pipeline JSON
 
 Responsável por:
@@ -280,10 +334,20 @@ Responsável por:
 - avaliar cobertura da extração
 - gerar o memorial final
 
+No estado atual, esse pipeline possui dois comportamentos relevantes:
+
+- **elétrico v1**: mapper determinístico com suporte opcional a extração assistida por LLM
+- **telecom v1**: mapper telecom dedicado com suporte opcional a extração assistida por LLM
+
 ## Extraction Mapper
 
 Responsável por transformar a saída da extração em um contexto mais próximo do contrato do template.
 Inclui lógica por campo, evidências e tratamento de diferentes padrões documentais.
+
+Atualmente já existem regras específicas para:
+
+- campos do memorial elétrico v1
+- campos base do memorial telecom v1, incluindo correções derivadas de projetos reais usados em testes end-to-end
 
 ## Context Builder
 
@@ -301,8 +365,8 @@ Implementação opcional de persistência de sessão em Supabase, usada quando h
 
 # Regras importantes do sistema
 
-- O **template DOCX é a fonte de verdade do memorial**.
-- O **schema JSON define o contrato de dados do template**.
+- Para fluxos com template ativo (como elétrico v1 e telecom v1), o **template DOCX é a fonte de verdade do memorial**.
+- O **schema JSON define o contrato de dados necessário para renderização**.
 - A renderização final deve ser **determinística**.
 - A geração final do memorial **não pode depender de LLM**.
 - A extração dos dados pode evoluir com heurísticas, OCR, visão computacional ou LLM, mas o documento final deve continuar obedecendo ao template e ao schema.
@@ -317,9 +381,11 @@ Implementação opcional de persistência de sessão em Supabase, usada quando h
 - docxtpl
 - python-docx
 - jsonschema
+- OpenAI API
 - Supabase
 - unittest
 - ruff
+- uv / `.venv`
 
 Dependendo da evolução do projeto, outras bibliotecas auxiliares podem existir no `requirements.txt`.
 
@@ -330,7 +396,8 @@ Dependendo da evolução do projeto, outras bibliotecas auxiliares podem existir
 ## Instalação de dependências
 
 ```bash
-pip install -r requirements.txt
+uv venv
+UV_CACHE_DIR=/tmp/uv-cache uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 ## Rodando a API
@@ -338,7 +405,7 @@ pip install -r requirements.txt
 Caso o entrypoint da aplicação seja `app.main:app`, use:
 
 ```bash
-uvicorn app.main:app --reload
+.venv/bin/uvicorn app.main:app --reload
 ```
 
 Se o projeto estiver usando outro entrypoint, ajuste o comando conforme a estrutura real do backend.
@@ -350,7 +417,7 @@ Se o projeto estiver usando outro entrypoint, ajuste o comando conforme a estrut
 ## Teste específico de renderização do template
 
 ```bash
-python scripts/test_render_eletrico.py
+.venv/bin/python scripts/test_render_eletrico.py
 ```
 
 Arquivos gerados por esse script são salvos em:
@@ -362,7 +429,7 @@ tests/output/
 ## Rodar toda a suíte de testes
 
 ```bash
-python -m unittest discover -s tests
+.venv/bin/python -m unittest discover -s tests
 ```
 
 ## Rodar arquivos específicos de teste
@@ -370,7 +437,13 @@ python -m unittest discover -s tests
 Exemplo:
 
 ```bash
-python -m unittest tests.test_session_store tests.test_supabase_session_store tests.test_api
+.venv/bin/python -m unittest tests.test_session_store tests.test_supabase_session_store tests.test_api
+```
+
+Exemplo de testes direcionados para os memoriais atuais:
+
+```bash
+.venv/bin/python -m unittest tests.test_pipeline tests.test_pipeline_from_files tests.test_api
 ```
 
 ---
@@ -401,6 +474,8 @@ Apesar do backend já estar funcional, ainda existem pontos em evolução:
 - a robustez operacional do fluxo por arquivos ainda está sendo refinada
 - a estratégia de cleanup e lifecycle de arquivos temporários ainda pode evoluir
 - a integração com Supabase ainda pode ser fortalecida para cenários mais concorrentes
+- o memorial telecom v1 já está funcional, mas ainda pode ganhar extração mais robusta e fluxo de revisão por sessão
+- o memorial de gás ainda não foi iniciado no backend
 
 ---
 
@@ -415,12 +490,25 @@ Prioridades atuais:
 3. reduzir duplicação interna no pipeline por arquivos
 4. ampliar testes end-to-end do fluxo de sessão
 5. fortalecer a integração e consistência do session store com Supabase
-6. evoluir a cobertura do extraction mapper para os campos ainda pendentes
+6. evoluir a cobertura do extraction mapper e da extração assistida por LLM para os campos ainda pendentes
+7. implementar o **memorial de gás** como próxima frente funcional
+8. separar a implementação de gás em dois casos explícitos desde o início:
+   - **gás GLP**
+   - **gás natural**
+9. preservar a mesma disciplina já aplicada em elétrico e telecom:
+   - template DOCX como fonte de verdade
+   - schema JSON como contrato
+   - renderização final determinística
 
 ---
 
 # Observações finais
 
-Este README descreve o estado atual do projeto com foco no memorial elétrico v1.
+Este README descreve o estado atual do projeto com foco principal nos memoriais **elétrico v1** e **telecom v1**, já integrados ao backend em diferentes níveis de maturidade operacional.
 
-O sistema já possui uma base funcional de geração automática com revisão manual opcional, mas ainda está em evolução para ganhar mais robustez operacional, melhor tipagem de contratos e maior cobertura de testes.
+O sistema já possui uma base funcional de geração automática com revisão manual opcional no fluxo elétrico, geração por arquivos em elétrico e telecom, e segue em evolução para ganhar mais robustez operacional, melhor tipagem de contratos, maior cobertura de testes e expansão para novos tipos de memorial.
+
+A próxima etapa planejada é a implementação do **memorial de gás**, tratado desde o início em dois cenários independentes:
+
+- **gás GLP**
+- **gás natural**

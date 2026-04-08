@@ -11,9 +11,13 @@ from app.services.llm_extractor import (
     LLMExtraction,
     NaoInclusosExtraction,
     ObraExtraction,
+    TelecomLLMExtraction,
+    _build_telecom_text_only_input,
+    _build_telecom_vision_input,
     _build_text_only_input,
     _build_vision_input,
     _first_non_null_merge,
+    extract_telecom_with_llm,
     extract_with_llm,
     is_llm_extraction_enabled,
 )
@@ -95,6 +99,14 @@ class LLMExtractionSchemaTests(unittest.TestCase):
         self.assertFalse(restored.nao_inclusos.cftv)
         self.assertEqual(restored.instalacao.perfilado_tipo, "C 38x38mm")
 
+    def test_telecom_schema_defaults_are_none(self) -> None:
+        extraction = TelecomLLMExtraction()
+        dumped = extraction.model_dump(mode="json")
+
+        for field_key, value in dumped["obra"].items():
+            self.assertIsNone(value, f"obra.{field_key} should default to None")
+        self.assertIsNone(dumped["observacoes"])
+
 
 class VisionInputTests(unittest.TestCase):
     def test_build_vision_input_includes_images_and_text(self) -> None:
@@ -124,6 +136,28 @@ class VisionInputTests(unittest.TestCase):
     def test_build_text_only_input_has_no_images(self) -> None:
         sf = _source_file(text="Some text")
         messages = _build_text_only_input(sf)
+
+        content = messages[0]["content"]
+        image_parts = [p for p in content if p.get("type") == "input_image"]
+        self.assertEqual(len(image_parts), 0)
+
+    def test_build_telecom_vision_input_includes_images_and_text(self) -> None:
+        sf = _source_file(
+            text="OCR telecom text",
+            page_images=["data:image/png;base64,AAA"],
+        )
+        messages = _build_telecom_vision_input(sf)
+
+        content = messages[0]["content"]
+        image_parts = [p for p in content if p["type"] == "input_image"]
+        text_parts = [p for p in content if p["type"] == "input_text"]
+
+        self.assertEqual(len(image_parts), 1)
+        self.assertTrue(any("OCR telecom text" in p["text"] for p in text_parts))
+
+    def test_build_telecom_text_only_input_has_no_images(self) -> None:
+        sf = _source_file(text="Some telecom text")
+        messages = _build_telecom_text_only_input(sf)
 
         content = messages[0]["content"]
         image_parts = [p for p in content if p.get("type") == "input_image"]
@@ -279,6 +313,64 @@ class ExtractWithLLMTests(unittest.TestCase):
             result = extract_with_llm([_source_file()])
 
         self.assertEqual(result, {})
+
+    def test_extract_telecom_returns_empty_when_disabled(self) -> None:
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
+            result = extract_telecom_with_llm([_source_file()])
+        self.assertEqual(result, {})
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_single_file_telecom_extraction(self, _model_mock, client_mock) -> None:
+        mock_parsed = TelecomLLMExtraction(
+            obra=ObraExtraction(
+                construtora="Teste Telecom",
+                nome="Residencial Fibra",
+                qtd_lojas=2,
+            )
+        )
+        mock_response = MagicMock()
+        mock_response.output_parsed = mock_parsed
+        mock_client = MagicMock()
+        mock_client.responses.parse.return_value = mock_response
+        client_mock.return_value = mock_client
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_telecom_with_llm([_source_file()])
+
+        mock_client.responses.parse.assert_called_once()
+        self.assertEqual(result["obra"]["construtora"], "Teste Telecom")
+        self.assertEqual(result["obra"]["nome"], "Residencial Fibra")
+        self.assertEqual(result["obra"]["qtd_lojas"], 2)
+        self.assertNotIn("observacoes", result)
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_multiple_files_triggers_telecom_merge(self, _model_mock, client_mock) -> None:
+        extraction_a = TelecomLLMExtraction(obra=ObraExtraction(construtora="Alpha"))
+        extraction_b = TelecomLLMExtraction(obra=ObraExtraction(qtd_lojas=3))
+        merged_result = TelecomLLMExtraction(
+            obra=ObraExtraction(construtora="Alpha", qtd_lojas=3)
+        )
+
+        response_a = MagicMock()
+        response_a.output_parsed = extraction_a
+        response_b = MagicMock()
+        response_b.output_parsed = extraction_b
+        merge_response = MagicMock()
+        merge_response.output_parsed = merged_result
+
+        mock_client = MagicMock()
+        mock_client.responses.parse.side_effect = [response_a, response_b, merge_response]
+        client_mock.return_value = mock_client
+
+        files = [_source_file("a.pdf", "text a"), _source_file("b.pdf", "text b")]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_telecom_with_llm(files)
+
+        self.assertEqual(mock_client.responses.parse.call_count, 3)
+        self.assertEqual(result["obra"]["construtora"], "Alpha")
+        self.assertEqual(result["obra"]["qtd_lojas"], 3)
 
 
 if __name__ == "__main__":

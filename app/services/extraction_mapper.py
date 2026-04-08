@@ -33,6 +33,21 @@ EXTRACTABLE_BY_MAPPER = (
     "nao_inclusos.automacao",
 )
 
+TELECOM_EXTRACTABLE_BY_MAPPER = (
+    "obra.construtora",
+    "obra.nome",
+    "obra.localizacao",
+    "obra.numero_cadastro",
+    "obra.qtd_apartamentos",
+)
+
+TELECOM_PENDING_EXTRACTION = (
+    "obra.tipo_edificacao",
+    "obra.tipologia",
+    "obra.qtd_lojas",
+    "obra.qtd_restaurantes",
+)
+
 # Campos extraíveis identificados nos projetos reais, ainda não implementados.
 PENDING_EXTRACTION = (
     "obra.tipo_edificacao",
@@ -78,6 +93,7 @@ _ADDRESS_PATTERN = re.compile(
     r"\b(?:AV\.|AVENIDA|RUA|AL\.|ESTRADA|RODOVIA|TRAVESSA|LOTEAMENTO)\b",
     re.IGNORECASE,
 )
+_PROJECT_NUMBER_PATTERN = re.compile(r"\b\d{2,6}/\d{4}\b")
 
 # Labels de quadros especializados. Presença → sistema incluído (False).
 # Ausência → sistema não incluso (True).
@@ -119,27 +135,73 @@ def _looks_like_building_name(text: str) -> bool:
 def _find_company_line(raw_text: str) -> tuple[int, list[str]] | None:
     """Encontra a primeira linha com padrão de razão social no bloco do carimbo."""
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    best_index: int | None = None
+    best_score = -10**9
+    negative_markers = (
+        "expressamente proibido",
+        "prévia autorização",
+        "previa autorizacao",
+        "reprodução total",
+        "reproducao total",
+        "veiculação a terceiros",
+        "veiculacao a terceiros",
+        "projetado por",
+        "quadro de controle",
+    )
     for i, line in enumerate(lines):
-        if _COMPANY_PATTERN.search(line) and len(line) > 10:
-            return i, lines
+        lowered = line.lower()
+        if not _COMPANY_PATTERN.search(line) or len(line) <= 10:
+            continue
+        score = 0
+        if "ltda" in lowered:
+            score += 10
+        if "engenharia" in lowered or "incorpora" in lowered or "constru" in lowered:
+            score += 5
+        if any(marker in lowered for marker in negative_markers):
+            score -= 20
+        if len(line) > 90:
+            score -= 8
+        if i > 0 and _looks_like_building_name(lines[i - 1]):
+            score += 5
+        if i + 1 < len(lines) and _ADDRESS_PATTERN.search(lines[i + 1]):
+            score += 8
+        if score > best_score:
+            best_score = score
+            best_index = i
+    if best_index is not None:
+        return best_index, lines
     return None
 
 
 def _extract_labeled_value(raw_text: str, labels: list[str]) -> tuple[str, str] | None:
     """Retorna (valor, linha_evidência) ou None."""
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    def _looks_like_another_label(value: str) -> bool:
+        stripped = value.strip()
+        if not stripped:
+            return True
+        if stripped.endswith(":"):
+            return True
+        if re.fullmatch(r"[A-Za-zÀ-ÿ ]{1,20}:", stripped):
+            return True
+        if stripped.lower() in {
+            "escala", "projeto", "edifício", "edificio", "local",
+            "construtor", "data", "desenho", "proprietário", "proprietario",
+        }:
+            return True
+        return False
     for i, line in enumerate(lines):
         for label in labels:
             pattern = re.compile(rf"^{label}\s*[:\-]\s*(.+)$", re.IGNORECASE)
             match = pattern.search(line)
             if match:
                 value = match.group(1).strip(" .;-")
-                if value:
+                if value and not _looks_like_another_label(value):
                     return value, line
             label_only = re.compile(rf"^{label}\s*[:\-]?\s*$", re.IGNORECASE)
             if label_only.match(line) and i + 1 < len(lines):
                 value = lines[i + 1].strip(" .;-")
-                if value:
+                if value and not _looks_like_another_label(value):
                     return value, f"{line} → {value}"
     return None
 
@@ -247,6 +309,16 @@ def _extract_localizacao(raw_text: str) -> FieldExtraction | None:
 
 
 def _extract_numero_cadastro(raw_text: str) -> FieldExtraction | None:
+    regex_match = _PROJECT_NUMBER_PATTERN.search(raw_text)
+    if regex_match:
+        value = regex_match.group(0)
+        return FieldExtraction(
+            value=value,
+            evidence=value,
+            rule="project_number_regex",
+            confidence="high",
+        )
+
     labeled = _extract_labeled_value(
         raw_text,
         labels=[
@@ -298,6 +370,18 @@ def _extract_perfilado_tipo(raw_text: str) -> FieldExtraction | None:
 
 
 def _extract_qtd_apartamentos(text: str) -> FieldExtraction | None:
+    apartment_ids = {
+        int(match)
+        for match in re.findall(r"\bAP(?:TO|\.)\s*0?(\d{2,3})\b", text, re.IGNORECASE)
+    }
+    if len(apartment_ids) >= 4:
+        return FieldExtraction(
+            value=len(apartment_ids),
+            evidence=f"{len(apartment_ids)} unidades únicas identificadas por AP/APTO",
+            rule="unique_apartment_ids",
+            confidence="high",
+        )
+
     for pattern in (
         r"(\d+)\s*aptos?\b",
         r"(\d+)\s*apartamentos?\b",
@@ -313,6 +397,107 @@ def _extract_qtd_apartamentos(text: str) -> FieldExtraction | None:
                 rule="apartment_count_regex",
                 confidence="medium",
             )
+    return None
+
+
+def _extract_telecom_tipo_edificacao(text: str) -> FieldExtraction | None:
+    lowered = text.lower()
+    if "apartamentos" in lowered or "apto" in lowered or "suíte" in lowered or "suite" in lowered:
+        return FieldExtraction(
+            value="Residencial Multifamiliar",
+            evidence="presença de apartamentos/suítes no projeto",
+            rule="telecom_residential_inference",
+            confidence="medium",
+        )
+    if "loja" in lowered or "restaurante" in lowered or "mini - market" in lowered or "mini-market" in lowered:
+        return FieldExtraction(
+            value="Misto",
+            evidence="presença de ocupação comercial no projeto",
+            rule="telecom_mixed_use_inference",
+            confidence="low",
+        )
+    return None
+
+
+def _extract_telecom_tipologia(text: str) -> FieldExtraction | None:
+    apartment_floors = {
+        int(match[0])
+        for match in re.findall(r"\bAP(?:TO|\.)\s*0?(\d)(\d{2})\b", text, re.IGNORECASE)
+    }
+    has_subsolo = "subsolo" in text.lower()
+    has_terreo = "térreo" in text.lower() or "terreo" in text.lower()
+    has_coberta = "coberta" in text.lower() or "cobertura" in text.lower()
+
+    if apartment_floors:
+        parts = []
+        if has_subsolo:
+            parts.append("Subsolo")
+        if has_terreo:
+            parts.append("térreo")
+        parts.append(f"{max(apartment_floors)} pavimentos")
+        if has_coberta:
+            parts.append("cobertura")
+        value = ", ".join(parts)
+        return FieldExtraction(
+            value=value,
+            evidence=f"andares identificados por apartamentos: {sorted(apartment_floors)}",
+            rule="telecom_floor_typology_inference",
+            confidence="medium",
+        )
+    return None
+
+
+def _extract_telecom_qtd_lojas(text: str) -> FieldExtraction | None:
+    lowered = text.lower()
+    match = re.search(r"(\d+)\s*lojas?\b", lowered, re.IGNORECASE)
+    if match:
+        return FieldExtraction(
+            value=int(match.group(1)),
+            evidence=match.group(0),
+            rule="telecom_store_count_regex",
+            confidence="medium",
+        )
+    if "mini - market" in lowered or "mini-market" in lowered:
+        return FieldExtraction(
+            value=0,
+            evidence="projeto residencial com mini-market de apoio e sem lojas identificadas",
+            rule="telecom_no_stores_residential_default",
+            confidence="low",
+        )
+    if "apartamentos" in lowered or "apto" in lowered:
+        return FieldExtraction(
+            value=0,
+            evidence="projeto residencial sem lojas explicitadas",
+            rule="telecom_no_stores_residential_default",
+            confidence="low",
+        )
+    return None
+
+
+def _extract_telecom_qtd_restaurantes(text: str) -> FieldExtraction | None:
+    lowered = text.lower()
+    match = re.search(r"(\d+)\s*restaurantes?\b", lowered, re.IGNORECASE)
+    if match:
+        return FieldExtraction(
+            value=int(match.group(1)),
+            evidence=match.group(0),
+            rule="telecom_restaurant_count_regex",
+            confidence="medium",
+        )
+    if "gourmet" in lowered and "restaurante" not in lowered:
+        return FieldExtraction(
+            value=0,
+            evidence="áreas gourmet sem restaurante identificado",
+            rule="telecom_no_restaurants_default",
+            confidence="low",
+        )
+    if "apartamentos" in lowered or "apto" in lowered:
+        return FieldExtraction(
+            value=0,
+            evidence="projeto residencial sem restaurantes explicitados",
+            rule="telecom_no_restaurants_default",
+            confidence="low",
+        )
     return None
 
 
@@ -513,6 +698,32 @@ def assess_extraction_coverage(mapping: MappingResult) -> ExtractionReport:
     )
 
 
+def assess_telecom_extraction_coverage(mapping: MappingResult) -> ExtractionReport:
+    filled = []
+    missing = []
+    for field_path in TELECOM_EXTRACTABLE_BY_MAPPER:
+        value = _get_nested_value(mapping.context, field_path)
+        if value is not None:
+            filled.append(field_path)
+        else:
+            missing.append(field_path)
+
+    pending = []
+    for field_path in TELECOM_PENDING_EXTRACTION:
+        value = _get_nested_value(mapping.context, field_path)
+        if value is not None:
+            filled.append(field_path)
+        else:
+            pending.append(field_path)
+
+    return ExtractionReport(
+        filled=filled,
+        missing=missing,
+        pending=pending,
+        evidence=mapping.evidence,
+    )
+
+
 def map_extraction_to_partial_context(extraction_result: ProjectExtractionResult) -> MappingResult:
     raw_text = extraction_result.raw_text
     text = _normalize_text(raw_text)
@@ -545,5 +756,30 @@ def map_extraction_to_partial_context(extraction_result: ProjectExtractionResult
 
     for field_name, extraction in _extract_nao_inclusos(raw_text).items():
         add(f"nao_inclusos.{field_name}", extraction)
+
+    return MappingResult(context=context, evidence=evidence)
+
+
+def map_extraction_to_partial_telecom_context(
+    extraction_result: ProjectExtractionResult,
+) -> MappingResult:
+    raw_text = extraction_result.raw_text
+    text = _normalize_text(raw_text)
+
+    context: dict[str, Any] = {}
+    evidence: dict[str, FieldExtraction] = {}
+
+    def add(path: str, extraction: FieldExtraction | None) -> None:
+        _add_field(context, evidence, path, extraction)
+
+    add("obra.construtora", _extract_construtora(raw_text))
+    add("obra.nome", _extract_nome_obra(raw_text))
+    add("obra.localizacao", _extract_localizacao(raw_text))
+    add("obra.numero_cadastro", _extract_numero_cadastro(raw_text))
+    add("obra.qtd_apartamentos", _extract_qtd_apartamentos(text))
+    add("obra.tipo_edificacao", _extract_telecom_tipo_edificacao(text))
+    add("obra.tipologia", _extract_telecom_tipologia(text))
+    add("obra.qtd_lojas", _extract_telecom_qtd_lojas(text))
+    add("obra.qtd_restaurantes", _extract_telecom_qtd_restaurantes(text))
 
     return MappingResult(context=context, evidence=evidence)

@@ -62,6 +62,37 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["errors"][0]["path"], "$.obra")
         self.assertIn("nome", body["errors"][0]["message"])
 
+    def test_post_memorial_telecom_returns_docx_for_valid_payload(self) -> None:
+        payload = load_fixture("telecom_base.json")
+
+        response = self.client.post("/api/v1/memoriais/telecom", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertTrue(
+            response.headers["content-disposition"].startswith("attachment;")
+        )
+        self.assertTrue(response.content.startswith(b"PK"))
+
+    def test_post_memorial_telecom_returns_400_for_invalid_payload(self) -> None:
+        payload = load_fixture("telecom_base.json")
+        del payload["obra"]["nome"]
+
+        response = self.client.post("/api/v1/memoriais/telecom", json=payload)
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(
+            body["detail"],
+            "Payload invalido para o memorial telecom v1.",
+        )
+        self.assertTrue(body["errors"])
+        self.assertEqual(body["errors"][0]["path"], "$.obra")
+        self.assertIn("nome", body["errors"][0]["message"])
+
     def test_post_memorial_eletrico_upload_returns_metadata_for_valid_files(self) -> None:
         files = [
             ("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf")),
@@ -82,6 +113,28 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(body["files"]), 2)
         self.assertNotIn("request_dir", body)
         self.assertNotIn("saved_path", body["files"][0])
+        self.assertEqual(body["files"][0]["extension"], ".pdf")
+        self.assertEqual(body["files"][1]["extension"], ".docx")
+        self.assertEqual(body["files"][0]["filename"], "projeto.pdf")
+
+    def test_post_memorial_telecom_upload_returns_metadata_for_valid_files(self) -> None:
+        files = [
+            ("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf")),
+            (
+                "files",
+                (
+                    "memorial.docx",
+                    b"PK\x03\x04conteudo",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            ),
+        ]
+
+        response = self.client.post("/api/v1/memoriais/telecom/upload", files=files)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body["files"]), 2)
         self.assertEqual(body["files"][0]["extension"], ".pdf")
         self.assertEqual(body["files"][1]["extension"], ".docx")
         self.assertEqual(body["files"][0]["filename"], "projeto.pdf")
@@ -158,6 +211,50 @@ class ApiTests(unittest.TestCase):
 
         pipeline_mock.assert_awaited_once()
 
+    @patch(
+        "app.api.routes.generate_memorial_telecom_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_post_memorial_telecom_from_files_returns_docx_for_valid_files(
+        self,
+        pipeline_mock,
+    ) -> None:
+        async def pipeline_side_effect(_files, output_path: Path) -> PipelineResult:
+            document = Document()
+            document.add_paragraph("Memorial telecom gerado a partir de arquivos.")
+            document.save(output_path)
+            return PipelineResult(
+                context={"obra": {"nome": "Edificio Exemplo"}},
+                output_path=output_path,
+            )
+
+        pipeline_mock.side_effect = pipeline_side_effect
+
+        files = [
+            (
+                "files",
+                (
+                    "projeto.docx",
+                    b"PK\x03\x04conteudo",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            )
+        ]
+
+        response = self.client.post(
+            "/api/v1/memoriais/telecom/from-files",
+            files=files,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertTrue(response.content.startswith(b"PK"))
+
+        pipeline_mock.assert_awaited_once()
+
     def test_post_memorial_eletrico_from_files_returns_400_for_invalid_extension(self) -> None:
         files = [
             (
@@ -216,6 +313,45 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["detail"], "Payload invalido para o memorial eletrico v1.")
         self.assertTrue(body["errors"])
         self.assertEqual(body["errors"][0]["path"], "$")
+
+    @patch(
+        "app.api.routes.generate_memorial_telecom_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_post_memorial_telecom_from_files_returns_400_for_validation_error(
+        self,
+        pipeline_mock,
+    ) -> None:
+        pipeline_mock.side_effect = MemorialValidationError(
+            [
+                ValidationIssue(
+                    path="$.obra",
+                    message="'tipologia' is a required property",
+                    validator="required",
+                )
+            ]
+        )
+        files = [
+            (
+                "files",
+                (
+                    "projeto.docx",
+                    b"PK\x03\x04conteudo",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            )
+        ]
+
+        response = self.client.post(
+            "/api/v1/memoriais/telecom/from-files",
+            files=files,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["detail"], "Payload invalido para o memorial telecom v1.")
+        self.assertTrue(body["errors"])
+        self.assertEqual(body["errors"][0]["path"], "$.obra")
 
 
 def _build_pending_session(session_id: str) -> ReviewSession:

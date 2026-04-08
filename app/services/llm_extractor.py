@@ -84,6 +84,11 @@ class LLMExtraction(BaseModel):
     observacoes: str | None = None
 
 
+class TelecomLLMExtraction(BaseModel):
+    obra: ObraExtraction = ObraExtraction()
+    observacoes: str | None = None
+
+
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 EXTRACTION_PROMPT = """\
@@ -190,6 +195,54 @@ Rules:
 Per-file extractions:
 """
 
+TELECOM_EXTRACTION_PROMPT = """\
+You are an expert structured data extractor for Brazilian telecommunications engineering projects.
+
+You will receive page images from telecom project drawings and memorial-related files, along with \
+supplementary OCR text. The images are the PRIMARY source of truth. Use OCR text only to confirm \
+or complement what is visible.
+
+Your job is to extract ONLY the fields required by the telecom memorial v1 contract.
+
+## Where to look for each field
+
+### obra (project info)
+Look at the TITLE BLOCK (carimbo), cover sheet, legends, unit schedules, or project notes.
+- construtora: company name responsible for the project or development
+- nome: project/building/enterprise name
+- localizacao: address, city/state, or project location
+- numero_cadastro: project/process/reference number shown in the title block
+- tipo_edificacao: building type such as "residencial", "comercial", or "misto"
+- tipologia: enterprise typology such as "torre única", "2 torres", or "condomínio"
+- qtd_apartamentos: apartment count from schedules or notes
+- qtd_lojas: commercial unit/store count from schedules or notes
+- qtd_restaurantes: restaurant count from schedules or notes
+
+## Rules
+- Extract ONLY from evidence visible in the images or OCR text.
+- Return null for any field without sufficient evidence.
+- NEVER invent or guess values.
+- Numeric fields must be numbers, not strings.
+- In observacoes, briefly note any ambiguities or extraction limitations.
+"""
+
+TELECOM_MERGE_PROMPT = """\
+You are merging structured extractions from multiple files of the SAME telecom project.
+
+Different files may contribute different project metadata, title-block information, or unit counts.
+
+Your task: produce a SINGLE unified extraction for the telecom memorial context.
+
+Rules:
+- When multiple files provide the SAME field with DIFFERENT values, prefer the value from the \
+  most authoritative file, such as the project cover, title block, or general notes sheet.
+- When only one file provides a field, use that value.
+- Return null only when NO file provided a value.
+- In observacoes, note any conflicts you resolved and which file you preferred.
+
+Per-file extractions:
+"""
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -234,10 +287,43 @@ def _build_vision_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]
     return [{"role": "user", "content": content}]
 
 
+def _build_telecom_vision_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [
+        {"type": "input_text", "text": TELECOM_EXTRACTION_PROMPT},
+    ]
+
+    for page_image in source_file.page_images:
+        content.append({
+            "type": "input_image",
+            "image_url": page_image,
+            "detail": "original",
+        })
+
+    if source_file.extracted_text.strip():
+        content.append({
+            "type": "input_text",
+            "text": f"Supplementary OCR text from {source_file.original_filename}:\n"
+                    f"{source_file.extracted_text}",
+        })
+
+    return [{"role": "user", "content": content}]
+
+
 def _build_text_only_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
     """Fallback for files without page images (e.g. DOCX)."""
     return [{"role": "user", "content": [
         {"type": "input_text", "text": EXTRACTION_PROMPT},
+        {
+            "type": "input_text",
+            "text": f"=== FILE: {source_file.original_filename} ===\n"
+                    f"{source_file.extracted_text}",
+        },
+    ]}]
+
+
+def _build_telecom_text_only_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": TELECOM_EXTRACTION_PROMPT},
         {
             "type": "input_text",
             "text": f"=== FILE: {source_file.original_filename} ===\n"
@@ -255,6 +341,18 @@ def _build_merge_input(
 
     return [{"role": "user", "content": [
         {"type": "input_text", "text": MERGE_PROMPT + "\n\n".join(sections)},
+    ]}]
+
+
+def _build_telecom_merge_input(
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    sections = []
+    for filename, extraction in per_file_results:
+        sections.append(f"=== {filename} ===\n{json.dumps(extraction, ensure_ascii=False, indent=2)}")
+
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": TELECOM_MERGE_PROMPT + "\n\n".join(sections)},
     ]}]
 
 
@@ -295,6 +393,31 @@ def _extract_single_file(
     return response.output_parsed.model_dump(mode="json")
 
 
+def _extract_telecom_single_file(
+    client: Any,
+    model: str,
+    source_file: ExtractedSourceFile,
+) -> dict[str, Any]:
+    has_images = bool(source_file.page_images)
+    input_messages = (
+        _build_telecom_vision_input(source_file) if has_images
+        else _build_telecom_text_only_input(source_file)
+    )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": input_messages,
+        "text_format": TelecomLLMExtraction,
+    }
+    if has_images:
+        kwargs["reasoning"] = {"effort": "high"}
+
+    response = client.responses.parse(**kwargs)
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
 def _merge_with_llm(
     client: Any,
     model: str,
@@ -305,6 +428,21 @@ def _merge_with_llm(
         model=model,
         input=_build_merge_input(per_file_results),
         text_format=LLMExtraction,
+    )
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _merge_telecom_with_llm(
+    client: Any,
+    model: str,
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    response = client.responses.parse(
+        model=model,
+        input=_build_telecom_merge_input(per_file_results),
+        text_format=TelecomLLMExtraction,
     )
     if response.output_parsed is None:
         return {}
@@ -371,5 +509,60 @@ def extract_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
     merged.pop("observacoes", None)
     elapsed = time.monotonic() - t0
     logger.info("LLM extraction complete: fields=%d, elapsed=%.1fs", _count_non_null_fields(merged), elapsed)
+
+    return merged
+
+
+def extract_telecom_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
+    """Vision-first extraction for telecom memorial fields only."""
+    if not is_llm_extraction_enabled():
+        logger.debug("Telecom LLM extraction disabled, skipping")
+        return {}
+
+    usable_files = [
+        sf for sf in source_files
+        if sf.extracted_text.strip() or sf.page_images
+    ]
+    if not usable_files:
+        logger.info("No extractable content in telecom source files, skipping LLM")
+        return {}
+
+    client = _get_client()
+    model = _get_model()
+    logger.info(
+        "Telecom LLM vision extraction: model=%s, files=%d",
+        model, len(usable_files),
+    )
+
+    t0 = time.monotonic()
+    per_file_results: list[tuple[str, dict[str, Any]]] = []
+
+    for sf in usable_files:
+        result = _extract_telecom_single_file(client, model, sf)
+        if result:
+            per_file_results.append((sf.original_filename, result))
+            logger.info(
+                "  telecom %s: %d fields extracted",
+                sf.original_filename,
+                _count_non_null_fields(result),
+            )
+
+    if not per_file_results:
+        logger.warning("Telecom LLM extraction returned no results from any file")
+        return {}
+
+    if len(per_file_results) == 1:
+        merged = per_file_results[0][1]
+    else:
+        logger.info("Merging %d telecom per-file extractions with LLM", len(per_file_results))
+        merged = _merge_telecom_with_llm(client, model, per_file_results)
+
+    merged.pop("observacoes", None)
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "Telecom LLM extraction complete: fields=%d, elapsed=%.1fs",
+        _count_non_null_fields(merged),
+        elapsed,
+    )
 
     return merged

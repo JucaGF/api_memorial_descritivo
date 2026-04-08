@@ -16,7 +16,10 @@ from app.services.pipeline import PipelineResult
 from app.services.pipeline_from_files import (
     _fill_gaps,
     extract_mapping_from_ingested_files,
+    extract_telecom_mapping_from_ingested_files,
     generate_memorial_eletrico_v1_from_ingested_files,
+    generate_memorial_telecom_v1_from_ingested_files,
+    generate_memorial_telecom_v1_from_uploaded_files,
     generate_memorial_eletrico_v1_from_uploaded_files,
 )
 from app.services.project_extractor import ProjectExtractionResult
@@ -147,6 +150,67 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Corp")
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
 
+    @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_telecom_context")
+    @patch("app.services.pipeline_from_files.extract_telecom_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_telecom_llm_primary_uses_llm_as_base(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        llm_context = {
+            "obra": {"construtora": "LLM Telecom", "nome": "Edifício LLM", "qtd_lojas": 2},
+        }
+        mapper_mapping = build_mapping_result({"obra": {"construtora": "Mapper Corp"}})
+        report = build_extraction_report()
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = llm_context
+        map_mock.return_value = mapper_mapping
+        assess_mock.return_value = report
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, _ = extract_telecom_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Telecom")
+        self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício LLM")
+        self.assertEqual(result_mapping.context["obra"]["qtd_lojas"], 2)
+
+    @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_telecom_context")
+    @patch("app.services.pipeline_from_files.extract_telecom_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_telecom_mapper_supplements_llm_gaps(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        llm_context = {"obra": {"construtora": "LLM Telecom", "nome": None}}
+        mapper_mapping = build_mapping_result(
+            {"obra": {"construtora": "Mapper Corp", "nome": "Edifício Mapper"}}
+        )
+        report = build_extraction_report()
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = llm_context
+        map_mock.return_value = mapper_mapping
+        assess_mock.return_value = report
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, _ = extract_telecom_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Telecom")
+        self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
+
 
 class GenerateFromIngestedFilesTests(unittest.TestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1")
@@ -209,6 +273,64 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
 
         self.assertIsNotNone(ctx.exception.extraction_report)
 
+    @patch("app.services.pipeline_from_files.generate_memorial_telecom_v1")
+    @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_telecom_context")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_runs_telecom_pipeline_and_returns_result(
+        self,
+        extract_mock,
+        map_mock,
+        assess_mock,
+        generate_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        mapping = build_mapping_result()
+        report = build_extraction_report()
+        output_path = ROOT / "tests" / "output" / "pipeline_from_files_telecom.docx"
+
+        extract_mock.return_value = extraction_result
+        map_mock.return_value = mapping
+        assess_mock.return_value = report
+        generate_mock.return_value = PipelineResult(
+            context=mapping.context, output_path=output_path
+        )
+
+        result = generate_memorial_telecom_v1_from_ingested_files(ingested_files, output_path)
+
+        self.assertIsInstance(result, PipelineResult)
+        self.assertEqual(result.output_path, output_path)
+        self.assertEqual(result.extraction_report, report)
+
+    @patch("app.services.pipeline_from_files.generate_memorial_telecom_v1")
+    @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_telecom_context")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_telecom_pipeline_raises_validation_error_with_extraction_report(
+        self,
+        extract_mock,
+        map_mock,
+        assess_mock,
+        generate_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        mapping = build_mapping_result()
+        report = build_extraction_report()
+        output_path = ROOT / "tests" / "output" / "pipeline_from_files_invalid_telecom.docx"
+
+        extract_mock.return_value = build_extraction_result()
+        map_mock.return_value = mapping
+        assess_mock.return_value = report
+        generate_mock.side_effect = MemorialValidationError(
+            [ValidationIssue(path="$.obra", message="'tipologia' is a required property", validator="required")]
+        )
+
+        with self.assertRaises(MemorialValidationError) as ctx:
+            generate_memorial_telecom_v1_from_ingested_files(ingested_files, output_path)
+
+        self.assertIsNotNone(ctx.exception.extraction_report)
+
 
 class GenerateFromUploadedFilesTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1_from_ingested_files")
@@ -265,6 +387,88 @@ class GenerateFromUploadedFilesTests(unittest.IsolatedAsyncioTestCase):
             await generate_memorial_eletrico_v1_from_uploaded_files(upload_files, output_path)
 
         cleanup_mock.assert_called_once_with(ingestion_result)
+
+    @patch("app.services.pipeline_from_files.generate_memorial_telecom_v1_from_ingested_files")
+    @patch("app.services.pipeline_from_files.ingest_uploaded_files", new_callable=AsyncMock)
+    async def test_calls_ingestion_and_telecom_pipeline(self, ingest_mock, pipeline_mock) -> None:
+        upload_files = [
+            UploadFile(
+                filename="projeto.docx",
+                file=io.BytesIO(b"PK\x03\x04docx"),
+                headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            )
+        ]
+        ingested_files = [build_ingested_file()]
+        ingestion_result = FileIngestionResult(
+            request_dir="/tmp/telecom_v1_upload_123",
+            files=ingested_files,
+        )
+        output_path = ROOT / "tests" / "output" / "pipeline_from_uploaded_files_telecom.docx"
+        expected_result = PipelineResult(context={"obra": {}}, output_path=output_path)
+
+        ingest_mock.return_value = ingestion_result
+        pipeline_mock.return_value = expected_result
+
+        result = await generate_memorial_telecom_v1_from_uploaded_files(upload_files, output_path)
+
+        self.assertEqual(result, expected_result)
+        ingest_mock.assert_awaited_once_with(upload_files)
+        pipeline_mock.assert_called_once_with(ingested_files, output_path)
+
+    @patch("app.services.pipeline_from_files.cleanup_ingestion_result")
+    @patch("app.services.pipeline_from_files.generate_memorial_telecom_v1_from_ingested_files")
+    @patch("app.services.pipeline_from_files.ingest_uploaded_files", new_callable=AsyncMock)
+    async def test_telecom_cleanup_runs_even_on_error(
+        self, ingest_mock, pipeline_mock, cleanup_mock
+    ) -> None:
+        upload_files = [
+            UploadFile(
+                filename="projeto.docx",
+                file=io.BytesIO(b"PK\x03\x04docx"),
+                headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            )
+        ]
+        ingestion_result = FileIngestionResult(
+            request_dir=mkdtemp(prefix="telecom_v1_upload_test_"),
+            files=[build_ingested_file()],
+        )
+        output_path = ROOT / "tests" / "output" / "pipeline_from_uploaded_files_invalid_telecom.docx"
+        ingest_mock.return_value = ingestion_result
+        pipeline_mock.side_effect = MemorialValidationError(
+            [ValidationIssue(path="$", message="'documento' is a required property", validator="required")]
+        )
+
+        with self.assertRaises(MemorialValidationError):
+            await generate_memorial_telecom_v1_from_uploaded_files(upload_files, output_path)
+
+        cleanup_mock.assert_called_once_with(ingestion_result)
+
+
+class TelecomMappingFromFilesTests(unittest.TestCase):
+    @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_telecom_context")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_extract_telecom_mapping_from_ingested_files(
+        self,
+        extract_mock,
+        map_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        mapping = build_mapping_result()
+        report = build_extraction_report()
+
+        extract_mock.return_value = build_extraction_result()
+        map_mock.return_value = mapping
+        assess_mock.return_value = report
+
+        result_mapping, result_report = extract_telecom_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping, mapping)
+        self.assertEqual(result_report, report)
+        extract_mock.assert_called_once_with(ingested_files)
+        map_mock.assert_called_once()
+        assess_mock.assert_called_once()
 
 
 class FillGapsTests(unittest.TestCase):

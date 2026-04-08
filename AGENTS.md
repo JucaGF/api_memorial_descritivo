@@ -1,174 +1,160 @@
 # AGENTS.md
 
-Instructions for code agents working in this repository.
+Instructions for coding agents working in this repository.
 
 Read this file before making changes.
 
-## Project focus
+## 1) Mission and project state
 
-This repository implements an API for automatic generation of engineering memorial documents from technical project files.
+This repository is a production-oriented backend for automatic generation of engineering memorial documents from technical project files.
 
-Current focus: **memorial elétrico v1**.
+Current operational focus:
 
-The system already includes:
+- memorial eletrico v1 (end-to-end generation and review-session flow)
 
-- DOCX template + JSON schema
-- JSON-based generation flow
-- file ingestion flow
-- generation from files
-- review-session flow with background extraction
-- session persistence in filesystem
-- optional session persistence in Supabase
-- automated tests across API, stores, mapper, pipelines, and rendering
+Secondary track in progress:
 
-Do not treat this repository as an early prototype. It is an existing backend in active evolution.
+- memorial telecom v1 (schema/notes currently present; full generation flow still evolving)
 
-## Core rules
+Treat the codebase as an actively evolving system, not as a greenfield prototype.
 
-Always preserve these rules:
+## 2) Instruction hierarchy (follow in this order)
 
-1. The **DOCX template** is the source of truth for the final document.
-2. The **JSON schema** defines the data contract required for rendering.
-3. Final memorial generation must remain **deterministic**.
-4. Do **not** use LLMs to generate the final memorial document.
+When instructions conflict, use this precedence:
+
+1. Direct user request for the current task
+2. System/developer runtime instructions
+3. This AGENTS.md
+4. Local implementation patterns in the touched modules
+
+If a user request conflicts with a hard safety/contract rule below, keep the contract and explain the limitation.
+
+## 3) Non-negotiable system rules
+
+Always preserve these constraints:
+
+1. The DOCX template is the source of truth for final document structure.
+2. The JSON schema is the data contract for rendering.
+3. Final memorial generation must remain deterministic.
+4. Do not use LLM output as final memorial content generation.
 5. Validate data before rendering.
-6. Prefer **small, localized changes** over broad refactors.
-7. Preserve existing API behavior unless the task explicitly requires changing it.
+6. Prefer small and localized changes over broad refactors.
+7. Preserve existing API behavior unless the task explicitly requires behavior change.
+8. Rendered DOCX must not contain unresolved Jinja placeholders.
 
-## Main areas of the codebase
+## 4) Repository map
 
-Work from the existing structure, not from a hypothetical future architecture.
+Primary areas:
 
-- `app/api/`  
-  HTTP routes and orchestration of exposed flows
+- app/api/: route handlers and HTTP orchestration
+- app/schemas/: API/internal contracts
+- app/services/: ingestion, extraction, mapping, pipelines, sessions, validation, rendering
+- templates/eletrico/v1/: template + schema + notes
+- templates/telecom/v1/: schema + notes (contract track)
+- tests/: unit/integration coverage
+- migrations/: persistence changes
 
-- `app/schemas/`  
-  API and internal data contracts
+## 5) Core flows to protect
 
-- `app/services/`  
-  Business logic, including ingestion, pipelines, mapping, session handling, validation, rendering, and optional Supabase integration
+### 5.1 JSON generation flow
 
-- `templates/eletrico/v1/`  
-  Memorial template, schema, and notes
-
-- `tests/`  
-  Automated tests
-
-- `migrations/`  
-  Persistence-related migrations
-
-## Key flows
-
-### 1. JSON generation
-
-Use when the memorial context is already structured.
-
+Use when context is already structured.
 Expected behavior:
 
 - validate context
 - render DOCX
 - return final document
 
-### 2. File ingestion
+### 5.2 File ingestion flow
 
 Use when uploaded files must be prepared for extraction/generation.
 
-### 3. Generation from files
+### 5.3 Generation-from-files flow
 
 Expected behavior:
 
 - ingest files
-- extract relevant information
+- extract information
 - map extraction into memorial context
 - validate context
 - render DOCX
 
-### 4. Review sessions
+### 5.4 Review-session flow
 
 Expected behavior:
 
 - create session
-- run extraction in background
+- execute extraction in background
 - persist partial context and extraction report
 - allow manual corrections
 - merge corrections into context
 - generate final document from reviewed context
 
-When changing review-session code, preserve consistency across:
+When changing review sessions, preserve consistency across:
 
 - route behavior
-- background task responsibility
+- background task ownership
 - session store behavior
 - filesystem and Supabase backends
 
-## Template and schema
+## 6) Vibe coding operating mode (how to execute work)
 
-Primary files:
+Use fast, safe iteration loops:
 
-- `templates/eletrico/v1/template.docx`
-- `templates/eletrico/v1/schema.json`
+1. Understand current behavior in code before editing.
+2. Make the smallest useful change.
+3. Run the narrowest relevant tests immediately.
+4. Inspect failures and fix with focused edits.
+5. Expand validation only after targeted tests pass.
 
-Rules:
+Execution principles:
 
-- always keep template and schema coherent
-- do not change template behavior without checking schema impact
-- do not change schema without checking template and tests
-- rendered DOCX must not contain unresolved Jinja placeholders
+- Favor clarity over clever abstractions.
+- Favor concrete evidence (tests/output) over assumptions.
+- Keep changes reversible and easy to review.
+- Do not mix unrelated refactors with requested behavior changes.
 
-## Extraction and mapping
-
-Extraction may use parsing, OCR, heuristics, vision, or LLM assistance, but the output used for final rendering must still conform to the schema-driven contract.
-
-When changing extraction or mapping:
-
-- prefer incremental changes
-- preserve pipeline compatibility
-- update tests for changed rules
-- avoid making weak inferences look like high-confidence data
-
-## Sessions and persistence
-
-The review-session flow is a critical part of the current system.
-
-When changing session-related code:
-
-- preserve current API behavior when possible
-- keep filesystem and Supabase behavior aligned
-- handle expiration, cleanup, and background-task ownership carefully
-- avoid introducing dead states or ambiguous status transitions
-
-## How to work
+## 7) Required workflow before editing
 
 Before changing code:
 
-1. Read `README.md`
-2. Read this `AGENTS.md`
-3. Read `docs/PLANS.md`
-4. Inspect the files directly related to the task
-5. Understand the current behavior before proposing changes
+1. Read README.md.
+2. Read this AGENTS.md.
+3. Read docs/PLANS.md.
+4. Inspect files directly related to the task.
+5. Identify existing behavior and relevant tests.
+
+For medium/high-risk tasks:
+
+- write a short plan before implementation
+- define what must not break
+- validate each milestone with tests
+
+## 8) Change scope guidelines
 
 For simple tasks:
 
-- make the smallest correct change
-- update relevant tests
-- run targeted tests
+- implement minimal correct change
+- update/add relevant tests only
+- run targeted test module(s)
 
-For medium or risky tasks:
+For medium/risky tasks:
 
-1. inspect current behavior first
-2. write a short implementation plan
-3. then make the change
-4. run relevant tests
+- inspect behavior first
+- plan briefly
+- implement incrementally
+- run targeted tests + nearby regression tests
 
-For large tasks or refactors:
+For large tasks/refactors:
 
-- use a plan document before implementation
-- break work into milestones
-- keep scope controlled
+- use a plan file in docs/plans/
+- split into milestones
+- keep compatibility constraints explicit
 
-## Testing
+## 9) Testing policy (mandatory)
 
-Run relevant tests for the area you changed.
+Do not consider a task complete without running relevant tests.
+use uv venv
 
 Common commands:
 
@@ -179,46 +165,72 @@ python -m unittest tests.test_session_store
 python -m unittest tests.test_supabase_session_store
 ```
 
-If you change:
+Minimum required by change type:
 
-- API behavior: run API tests
-- session persistence: run store tests
-- extraction or mapping: run related mapper/pipeline tests
-- template/render logic: run rendering-related tests
+- API behavior changes: run tests.test_api
+- session persistence changes: run tests.test_session_store and tests.test_supabase_session_store
+- extraction/mapping changes: run mapper/pipeline-related tests
+- render/template/validation changes: run memorial renderer/validator tests
+- cross-flow changes: run full suite (discover -s tests)
 
-Do not consider the task complete without running relevant tests.
+## 10) Template and schema evolution rules
 
-## Avoid
+If touching template/schema-related logic:
+
+- keep template and schema coherent
+- do not change template behavior without schema impact check
+- do not change schema without template and test impact check
+- keep rendering deterministic and contract-driven
+
+## 11) Extraction and mapping rules
+
+Extraction can use parsing/OCR/heuristics/vision/LLM assistance, but:
+
+- output used for final rendering must conform to schema contract
+- do not present low-confidence inference as high-confidence fact
+- preserve pipeline compatibility when evolving mapping
+- update tests for changed mapping/extraction rules
+
+## 12) Session and persistence rules
+
+Review-session behavior is critical.
+When changing session code:
+
+- preserve API contract whenever possible
+- keep filesystem and Supabase behavior aligned
+- handle expiration and cleanup explicitly
+- avoid ambiguous or dead status transitions
+
+## 13) Avoid
 
 Do not:
 
 - remove schema validation
-- use LLMs to generate the final memorial
+- use LLMs to generate final memorial document content
 - change template and schema incoherently
-- create unnecessary abstractions
-- modify unrelated parts of the codebase
-- make large refactors when a focused change is enough
-- assume behavior without checking the code
-- modify files outside the repository
+- introduce unnecessary abstractions
+- modify unrelated parts of codebase
+- assume behavior without reading code
+- modify files outside repository scope
 
-## Definition of done
+## 14) Definition of done
 
 A task is done only when:
 
-- the requested behavior is correctly implemented
-- the change is consistent with the current architecture
-- relevant tests pass
-- the scope stayed controlled
-- the final code remains readable and maintainable
-- the summary of changes is clear and concrete
+1. requested behavior is correctly implemented
+2. architecture/contracts are preserved
+3. relevant tests pass
+4. scope remained controlled
+5. code is readable and maintainable
+6. changes and validation were clearly summarized
 
-## Current engineering priorities
+## 15) Engineering priorities for trade-off decisions
 
-When multiple implementation paths are possible, prefer the one that improves:
+When multiple valid paths exist, prefer what improves:
 
-1. operational robustness of existing flows
+1. robustness of existing operational flows
 2. clarity of review-session contracts
-3. consistency between filesystem and Supabase
-4. stronger tests
-5. reduced duplication in file-based pipelines
-6. incremental improvements to extraction/mapping
+3. consistency between filesystem and Supabase backends
+4. test strength and confidence
+5. duplication reduction in file-based pipelines
+6. incremental quality gains in extraction/mapping
