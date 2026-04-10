@@ -6,6 +6,7 @@ import unittest
 
 from app.services.context_builder import (
     build_memorial_eletrico_v1_context,
+    build_memorial_gas_natural_v1_context,
     build_memorial_telecom_v1_context,
     merge_context,
 )
@@ -80,6 +81,24 @@ class ContextBuilderTests(unittest.TestCase):
         del payload["documento"]["data_atual"]
 
         context = build_memorial_telecom_v1_context(payload)
+
+        self.assertNotIn("data_atual", payload["documento"])
+        self.assertIn("data_atual", context["documento"])
+
+    def test_gas_natural_fills_documento_data_atual_when_missing(self) -> None:
+        payload = load_fixture("gas_natural_base.json")
+        del payload["documento"]["data_atual"]
+
+        context = build_memorial_gas_natural_v1_context(payload)
+
+        self.assertIn("data_atual", context["documento"])
+        self.assertTrue(context["documento"]["data_atual"])
+
+    def test_gas_natural_does_not_mutate_original_input_payload(self) -> None:
+        payload = load_fixture("gas_natural_base.json")
+        del payload["documento"]["data_atual"]
+
+        context = build_memorial_gas_natural_v1_context(payload)
 
         self.assertNotIn("data_atual", payload["documento"])
         self.assertIn("data_atual", context["documento"])

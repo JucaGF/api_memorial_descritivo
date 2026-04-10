@@ -6,17 +6,21 @@ from unittest.mock import MagicMock, patch
 
 from app.services.llm_extractor import (
     EnergiaExtraction,
+    GasNaturalLLMExtraction,
     GeradorExtraction,
     InstalacaoExtraction,
     LLMExtraction,
     NaoInclusosExtraction,
     ObraExtraction,
     TelecomLLMExtraction,
+    _build_gas_natural_text_only_input,
+    _build_gas_natural_vision_input,
     _build_telecom_text_only_input,
     _build_telecom_vision_input,
     _build_text_only_input,
     _build_vision_input,
     _first_non_null_merge,
+    extract_gas_natural_with_llm,
     extract_telecom_with_llm,
     extract_with_llm,
     is_llm_extraction_enabled,
@@ -107,6 +111,25 @@ class LLMExtractionSchemaTests(unittest.TestCase):
             self.assertIsNone(value, f"obra.{field_key} should default to None")
         self.assertIsNone(dumped["observacoes"])
 
+    def test_gas_natural_schema_defaults_are_none(self) -> None:
+        extraction = GasNaturalLLMExtraction()
+        dumped = extraction.model_dump(mode="json")
+
+        for section_key in (
+            "obra",
+            "crm",
+            "dimensionamento",
+            "soma",
+            "ramal",
+            "valvula",
+            "numero",
+        ):
+            section = dumped[section_key]
+            for field_key, value in section.items():
+                self.assertIsNone(value, f"{section_key}.{field_key} should default to None")
+        self.assertIsNone(dumped["teto_ou_piso"])
+        self.assertIsNone(dumped["observacoes"])
+
 
 class VisionInputTests(unittest.TestCase):
     def test_build_vision_input_includes_images_and_text(self) -> None:
@@ -158,6 +181,28 @@ class VisionInputTests(unittest.TestCase):
     def test_build_telecom_text_only_input_has_no_images(self) -> None:
         sf = _source_file(text="Some telecom text")
         messages = _build_telecom_text_only_input(sf)
+
+        content = messages[0]["content"]
+        image_parts = [p for p in content if p.get("type") == "input_image"]
+        self.assertEqual(len(image_parts), 0)
+
+    def test_build_gas_natural_vision_input_includes_images_and_text(self) -> None:
+        sf = _source_file(
+            text="OCR gas natural text",
+            page_images=["data:image/png;base64,AAA"],
+        )
+        messages = _build_gas_natural_vision_input(sf)
+
+        content = messages[0]["content"]
+        image_parts = [p for p in content if p["type"] == "input_image"]
+        text_parts = [p for p in content if p["type"] == "input_text"]
+
+        self.assertEqual(len(image_parts), 1)
+        self.assertTrue(any("OCR gas natural text" in p["text"] for p in text_parts))
+
+    def test_build_gas_natural_text_only_input_has_no_images(self) -> None:
+        sf = _source_file(text="Some gas natural text")
+        messages = _build_gas_natural_text_only_input(sf)
 
         content = messages[0]["content"]
         image_parts = [p for p in content if p.get("type") == "input_image"]
@@ -371,6 +416,63 @@ class ExtractWithLLMTests(unittest.TestCase):
         self.assertEqual(mock_client.responses.parse.call_count, 3)
         self.assertEqual(result["obra"]["construtora"], "Alpha")
         self.assertEqual(result["obra"]["qtd_lojas"], 3)
+
+    def test_extract_gas_natural_returns_empty_when_disabled(self) -> None:
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
+            result = extract_gas_natural_with_llm([_source_file()])
+        self.assertEqual(result, {})
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_single_file_gas_natural_extraction(self, _model_mock, client_mock) -> None:
+        mock_parsed = GasNaturalLLMExtraction(
+            obra=ObraExtraction(
+                construtora="Teste Gas",
+                nome="Residencial Gas",
+            )
+        )
+        mock_response = MagicMock()
+        mock_response.output_parsed = mock_parsed
+        mock_client = MagicMock()
+        mock_client.responses.parse.return_value = mock_response
+        client_mock.return_value = mock_client
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_gas_natural_with_llm([_source_file()])
+
+        mock_client.responses.parse.assert_called_once()
+        self.assertEqual(result["obra"]["construtora"], "Teste Gas")
+        self.assertEqual(result["obra"]["nome"], "Residencial Gas")
+        self.assertNotIn("observacoes", result)
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_multiple_files_triggers_gas_natural_merge(self, _model_mock, client_mock) -> None:
+        extraction_a = GasNaturalLLMExtraction(obra=ObraExtraction(construtora="Alpha"))
+        extraction_b = GasNaturalLLMExtraction(valvula={"esfera_diametro": "32 mm"})
+        merged_result = GasNaturalLLMExtraction(
+            obra=ObraExtraction(construtora="Alpha"),
+            valvula={"esfera_diametro": "32 mm"},
+        )
+
+        response_a = MagicMock()
+        response_a.output_parsed = extraction_a
+        response_b = MagicMock()
+        response_b.output_parsed = extraction_b
+        merge_response = MagicMock()
+        merge_response.output_parsed = merged_result
+
+        mock_client = MagicMock()
+        mock_client.responses.parse.side_effect = [response_a, response_b, merge_response]
+        client_mock.return_value = mock_client
+
+        files = [_source_file("a.pdf", "text a"), _source_file("b.pdf", "text b")]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_gas_natural_with_llm(files)
+
+        self.assertEqual(mock_client.responses.parse.call_count, 3)
+        self.assertEqual(result["obra"]["construtora"], "Alpha")
+        self.assertEqual(result["valvula"]["esfera_diametro"], "32 mm")
 
 
 if __name__ == "__main__":

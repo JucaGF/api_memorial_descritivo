@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MemorialGasNaturalContextV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "documento",
+    "obra",
+    "crm",
+    "dimensionamento",
+    "soma",
+    "ramal",
+    "valvula",
+    "numero",
+    "teto_ou_piso"
+  ],
+  "properties": {
+    "documento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_atual"],
+      "properties": {
+        "data_atual": {
+          "type": "string",
+          "description": "Data exibida na capa do memorial"
+        }
+      }
+    },
+    "obra": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "numero_cadastro",
+        "construtora",
+        "nome",
+        "localizacao",
+        "tipo_edificacao",
+        "tipologia",
+        "qtd_apartamentos",
+        "qtd_lojas",
+        "qtd_restaurantes"
+      ],
+      "properties": {
+        "numero_cadastro": {
+          "type": "string",
+          "description": "Número de cadastro da obra exibido na capa"
+        },
+        "construtora": {
+          "type": "string",
+          "description": "Nome da construtora responsável pela obra"
+        },
+        "nome": {
+          "type": "string",
+          "description": "Nome da obra ou empreendimento"
+        },
+        "localizacao": {
+          "type": "string",
+          "description": "Localização da obra"
+        },
+        "tipo_edificacao": {
+          "type": "string",
+          "description": "Tipo de edificação"
+        },
+        "tipologia": {
+          "type": "string",
+          "description": "Tipologia do empreendimento"
+        },
+        "qtd_apartamentos": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de apartamentos"
+        },
+        "qtd_lojas": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de lojas"
+        },
+        "qtd_restaurantes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de restaurantes"
+        }
+      }
+    },
+    "crm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pavimento"],
+      "properties": {
+        "pavimento": {
+          "type": "string",
+          "description": "Pavimento onde está localizado o CRM"
+        }
+      }
+    },
+    "dimensionamento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qtd_fogao", "qtd_aquecedor", "qtd_churrasqueira"],
+      "properties": {
+        "qtd_fogao": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de fogões 4 bocas considerados no dimensionamento"
+        },
+        "qtd_aquecedor": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de aquecedores de passagem a gás considerados no dimensionamento"
+        },
+        "qtd_churrasqueira": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de churrasqueiras 4 bocas consideradas no dimensionamento"
+        }
+      }
+    },
+    "soma": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qtd_pontos_de_utilizacao"],
+      "properties": {
+        "qtd_pontos_de_utilizacao": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade total de pontos de utilização"
+        }
+      }
+    },
+    "ramal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primario_diametro",
+        "primario_material",
+        "primario_pavimento"
+      ],
+      "properties": {
+        "primario_diametro": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Diâmetro do ramal interno primário em mm"
+        },
+        "primario_material": {
+          "type": "string",
+          "description": "Material do ramal interno primário"
+        },
+        "primario_pavimento": {
+          "type": "string",
+          "description": "Pavimento por onde percorre o ramal interno primário"
+        }
+      }
+    },
+    "valvula": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["esfera_diametro"],
+      "properties": {
+        "esfera_diametro": {
+          "type": "string",
+          "description": "Diâmetro da válvula de esfera"
+        }
+      }
+    },
+    "numero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prancha"],
+      "properties": {
+        "prancha": {
+          "type": "string",
+          "description": "Número da prancha do corte esquemático"
+        }
+      }
+    },
+    "teto_ou_piso": {
+      "type": "string",
+      "description": "Indica se o ramal percorre o teto ou o piso"
+    }
+  }
+}

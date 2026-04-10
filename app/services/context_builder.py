@@ -86,3 +86,13 @@ def build_memorial_telecom_v1_context(input_payload: dict[str, Any]) -> dict[str
     context["obra"] = obra
 
     return context
+
+
+def build_memorial_gas_natural_v1_context(input_payload: dict[str, Any]) -> dict[str, Any]:
+    context = deepcopy(input_payload)
+
+    documento = _ensure_dict(context, "documento")
+    documento.setdefault("data_atual", date.today().strftime("%d/%m/%Y"))
+    context["documento"] = documento
+
+    return context

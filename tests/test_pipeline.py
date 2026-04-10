@@ -9,6 +9,7 @@ from app.services.memorial_validator import MemorialValidationError, ValidationI
 from app.services.pipeline import (
     PipelineResult,
     generate_memorial_eletrico_v1,
+    generate_memorial_gas_natural_v1,
     generate_memorial_telecom_v1,
 )
 
@@ -114,6 +115,53 @@ class PipelineTests(unittest.TestCase):
 
         with self.assertRaises(MemorialValidationError):
             generate_memorial_telecom_v1(payload, output_path)
+
+        validate_mock.assert_called_once()
+        render_mock.assert_not_called()
+
+    @patch("app.services.pipeline.validate_memorial_gas_natural_v1_context")
+    @patch("app.services.pipeline.render_memorial_gas_natural_v1")
+    def test_generate_memorial_gas_natural_v1_builds_valid_context_and_renders(
+        self,
+        render_mock,
+        validate_mock,
+    ) -> None:
+        payload = load_fixture("gas_natural_base.json")
+        del payload["documento"]["data_atual"]
+        output_path = ROOT / "tests" / "output" / "pipeline_renderizado_gas_natural.docx"
+        render_mock.return_value = output_path
+        validate_mock.return_value = []
+
+        result = generate_memorial_gas_natural_v1(payload, output_path)
+
+        self.assertIsInstance(result, PipelineResult)
+        self.assertEqual(result.output_path, output_path)
+        self.assertIn("data_atual", result.context["documento"])
+        validate_mock.assert_called_once_with(result.context)
+        render_mock.assert_called_once_with(result.context, output_path)
+
+    @patch("app.services.pipeline.validate_memorial_gas_natural_v1_context")
+    @patch("app.services.pipeline.render_memorial_gas_natural_v1")
+    def test_generate_memorial_gas_natural_v1_does_not_render_when_validation_fails(
+        self,
+        render_mock,
+        validate_mock,
+    ) -> None:
+        payload = load_fixture("gas_natural_base.json")
+        del payload["valvula"]["esfera_diametro"]
+        output_path = ROOT / "tests" / "output" / "pipeline_invalido_gas_natural.docx"
+        validate_mock.side_effect = MemorialValidationError(
+            [
+                ValidationIssue(
+                    path="$.valvula",
+                    message="'esfera_diametro' is a required property",
+                    validator="required",
+                )
+            ]
+        )
+
+        with self.assertRaises(MemorialValidationError):
+            generate_memorial_gas_natural_v1(payload, output_path)
 
         validate_mock.assert_called_once()
         render_mock.assert_not_called()

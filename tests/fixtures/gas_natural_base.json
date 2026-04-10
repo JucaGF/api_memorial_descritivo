@@ -1,0 +1,39 @@
+{
+  "documento": {
+    "data_atual": "10/04/2026"
+  },
+  "obra": {
+    "numero_cadastro": "1234/2026",
+    "construtora": "Exemplo Engenharia LTDA",
+    "nome": "Residencial Exemplo",
+    "localizacao": "Rua Exemplo, Recife/PE",
+    "tipo_edificacao": "residencial",
+    "tipologia": "torre unica",
+    "qtd_apartamentos": 32,
+    "qtd_lojas": 0,
+    "qtd_restaurantes": 0
+  },
+  "crm": {
+    "pavimento": "terreo"
+  },
+  "dimensionamento": {
+    "qtd_fogao": 32,
+    "qtd_aquecedor": 32,
+    "qtd_churrasqueira": 0
+  },
+  "soma": {
+    "qtd_pontos_de_utilizacao": 64
+  },
+  "ramal": {
+    "primario_diametro": 32,
+    "primario_material": "aco carbono",
+    "primario_pavimento": "terreo"
+  },
+  "valvula": {
+    "esfera_diametro": "32 mm"
+  },
+  "numero": {
+    "prancha": "01/05"
+  },
+  "teto_ou_piso": "teto"
+}

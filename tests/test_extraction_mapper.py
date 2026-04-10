@@ -7,8 +7,10 @@ from app.services.extraction_mapper import (
     FieldExtraction,
     MappingResult,
     assess_extraction_coverage,
+    assess_gas_natural_extraction_coverage,
     assess_telecom_extraction_coverage,
     map_extraction_to_partial_context,
+    map_extraction_to_partial_gas_natural_context,
     map_extraction_to_partial_telecom_context,
 )
 from app.services.project_extractor import ExtractedSourceFile, ProjectExtractionResult
@@ -391,6 +393,39 @@ class TelecomExtractionMapperTests(unittest.TestCase):
         self.assertEqual(context["qtd_lojas"], 0)
         self.assertEqual(context["qtd_restaurantes"], 0)
         self.assertIn("pavimentos", context["tipologia"].lower())
+
+
+class GasNaturalExtractionMapperTests(unittest.TestCase):
+    def test_maps_only_gas_natural_relevant_first_pass_fields(self) -> None:
+        result = map_extraction_to_partial_gas_natural_context(build_extraction_result(CARIMBO_TEXT))
+
+        self.assertEqual(result.context["obra"]["construtora"], "MGA CONSTRUÇÕES E INCORPORAÇÕES LTDA")
+        self.assertEqual(result.context["obra"]["nome"], "MAKAI")
+        self.assertIn("CABEDELO", result.context["obra"]["localizacao"])
+        self.assertEqual(result.context["obra"]["numero_cadastro"], "23/2024")
+        self.assertNotIn("energia", result.context)
+        self.assertNotIn("crm", result.context)
+        self.assertNotIn("dimensionamento", result.context)
+
+    def test_gas_natural_coverage_marks_base_fields_and_pending_fields(self) -> None:
+        result = map_extraction_to_partial_gas_natural_context(build_extraction_result(CARIMBO_TEXT))
+        report = assess_gas_natural_extraction_coverage(result)
+
+        self.assertIn("obra.construtora", report.filled)
+        self.assertIn("crm.pavimento", report.pending)
+        self.assertIn("valvula.esfera_diametro", report.pending)
+
+    def test_gas_natural_mapper_handles_real_carimbo_fields(self) -> None:
+        result = map_extraction_to_partial_gas_natural_context(
+            build_extraction_result(REAL_TELECOM_CARIMBO_TEXT)
+        )
+        context = result.context["obra"]
+
+        self.assertEqual(context["construtora"], "MGA CONSTRUÇÕES E INCORPORAÇÕES LTDA")
+        self.assertEqual(context["nome"], "MAKAI")
+        self.assertIn("MAX ZAGEL", context["localizacao"])
+        self.assertEqual(context["numero_cadastro"], "23/2024")
+        self.assertEqual(context["qtd_apartamentos"], 30)
 
 
 if __name__ == "__main__":

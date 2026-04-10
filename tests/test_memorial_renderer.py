@@ -11,10 +11,12 @@ from app.services.memorial_renderer import (
     has_docx_render_dependencies,
     inspect_docx_text,
     render_memorial_eletrico_v1,
+    render_memorial_gas_natural_v1,
     render_memorial_telecom_v1,
 )
 from app.services.memorial_validator import (
     validate_memorial_eletrico_v1_context,
+    validate_memorial_gas_natural_v1_context,
     validate_memorial_telecom_v1_context,
 )
 
@@ -22,6 +24,7 @@ from app.services.memorial_validator import (
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_PATH = ROOT / "tests" / "fixtures" / "eletrico_sem_subestacao.json"
 TELECOM_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "telecom_base.json"
+GAS_NATURAL_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "gas_natural_base.json"
 
 
 def load_fixture() -> dict:
@@ -31,6 +34,11 @@ def load_fixture() -> dict:
 
 def load_telecom_fixture() -> dict:
     with TELECOM_FIXTURE_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def load_gas_natural_fixture() -> dict:
+    with GAS_NATURAL_FIXTURE_PATH.open("r", encoding="utf-8") as file:
         return json.load(file)
 
 
@@ -54,6 +62,12 @@ def build_valid_context() -> dict:
 def build_valid_telecom_context() -> dict:
     context = load_telecom_fixture()
     validate_memorial_telecom_v1_context(context)
+    return context
+
+
+def build_valid_gas_natural_context() -> dict:
+    context = load_gas_natural_fixture()
+    validate_memorial_gas_natural_v1_context(context)
     return context
 
 
@@ -87,6 +101,34 @@ class MemorialRendererTests(unittest.TestCase):
         text = inspect_docx_text(output_path)
         self.assertNotIn("{{", text)
         self.assertNotIn("{%", text)
+
+    @unittest.skipUnless(
+        has_docx_render_dependencies(),
+        "python-docx e docxtpl nao estao instalados no ambiente",
+    )
+    def test_render_memorial_gas_natural_v1_generates_docx_without_template_tokens(self) -> None:
+        tmp_dir = ROOT / "tests" / "output"
+        output_path = tmp_dir / "renderer_test_output_gas_natural.docx"
+
+        render_memorial_gas_natural_v1(build_valid_gas_natural_context(), output_path)
+
+        self.assertTrue(output_path.exists())
+        text = inspect_docx_text(output_path)
+        self.assertNotIn("{{", text)
+        self.assertNotIn("{%", text)
+
+    @unittest.skipUnless(
+        has_docx_render_dependencies(),
+        "python-docx e docxtpl nao estao instalados no ambiente",
+    )
+    def test_render_memorial_gas_natural_v1_renders_valvula_esfera_diametro(self) -> None:
+        tmp_dir = ROOT / "tests" / "output"
+        output_path = tmp_dir / "renderer_test_output_gas_natural_valvula.docx"
+
+        render_memorial_gas_natural_v1(build_valid_gas_natural_context(), output_path)
+
+        text = inspect_docx_text(output_path)
+        self.assertIn("32 mm", text)
 
     def test_assert_no_jinja_left_raises_structured_error(self) -> None:
         with self.assertRaises(MemorialRenderError) as error_info:

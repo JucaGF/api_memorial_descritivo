@@ -9,8 +9,10 @@ from app.services.extraction_mapper import (
     ExtractionReport,
     MappingResult,
     assess_extraction_coverage,
+    assess_gas_natural_extraction_coverage,
     assess_telecom_extraction_coverage,
     map_extraction_to_partial_context,
+    map_extraction_to_partial_gas_natural_context,
     map_extraction_to_partial_telecom_context,
 )
 from app.services.file_ingestion import (
@@ -20,6 +22,7 @@ from app.services.file_ingestion import (
     ingest_uploaded_files,
 )
 from app.services.llm_extractor import (
+    extract_gas_natural_with_llm,
     extract_telecom_with_llm,
     extract_with_llm,
     is_llm_extraction_enabled,
@@ -28,6 +31,7 @@ from app.services.memorial_validator import MemorialValidationError
 from app.services.pipeline import (
     PipelineResult,
     generate_memorial_eletrico_v1,
+    generate_memorial_gas_natural_v1,
     generate_memorial_telecom_v1,
 )
 from app.services.project_extractor import extract_project_files
@@ -156,6 +160,48 @@ def extract_telecom_mapping_from_ingested_files(
     return mapping, report
 
 
+def extract_gas_natural_mapping_from_ingested_files(
+    files: list[IngestedFileMetadata],
+) -> tuple[MappingResult, ExtractionReport]:
+    if is_llm_extraction_enabled():
+        extraction_result = extract_project_files(files)
+
+        llm_context = extract_gas_natural_with_llm(extraction_result.source_files)
+        llm_fields = sum(
+            1 for section in llm_context.values()
+            if isinstance(section, dict)
+            for v in section.values()
+            if v is not None
+        )
+        logger.info("Gas natural LLM primary extracted %d fields from %d files", llm_fields, len(files))
+
+        mapper_mapping = map_extraction_to_partial_gas_natural_context(extraction_result)
+        gap_fills = _fill_gaps(llm_context, mapper_mapping.context)
+        if gap_fills:
+            gap_count = sum(len(s) for s in gap_fills.values() if isinstance(s, dict))
+            logger.info("Gas natural mapper supplemented %d additional fields", gap_count)
+            final_context = merge_context(llm_context, gap_fills)
+        else:
+            final_context = llm_context
+
+        mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
+        report = assess_gas_natural_extraction_coverage(mapping)
+        logger.info(
+            "Gas natural extraction coverage: filled=%d, missing=%d, pending=%d",
+            len(report.filled), len(report.missing), len(report.pending),
+        )
+        return mapping, report
+
+    extraction_result = extract_project_files(files)
+    mapping = map_extraction_to_partial_gas_natural_context(extraction_result)
+    report = assess_gas_natural_extraction_coverage(mapping)
+    logger.info(
+        "Gas natural extraction coverage: filled=%d, missing=%d, pending=%d",
+        len(report.filled), len(report.missing), len(report.pending),
+    )
+    return mapping, report
+
+
 def generate_memorial_eletrico_v1_from_ingested_files(
     files: list[IngestedFileMetadata],
     output_path: Path,
@@ -221,6 +267,42 @@ async def generate_memorial_telecom_v1_from_uploaded_files(
     ingestion_result = await ingest_uploaded_files(files)
     try:
         return generate_memorial_telecom_v1_from_ingested_files(
+            ingestion_result.files,
+            output_path,
+        )
+    finally:
+        cleanup_ingestion_result(ingestion_result)
+
+
+def generate_memorial_gas_natural_v1_from_ingested_files(
+    files: list[IngestedFileMetadata],
+    output_path: Path,
+) -> PipelineResult:
+    mapping, report = extract_gas_natural_mapping_from_ingested_files(files)
+
+    try:
+        result = generate_memorial_gas_natural_v1(mapping.context, output_path)
+        return PipelineResult(
+            context=result.context,
+            output_path=result.output_path,
+            extraction_report=report,
+        )
+    except MemorialValidationError as error:
+        from dataclasses import asdict
+
+        raise MemorialValidationError(
+            issues=error.issues,
+            extraction_report=asdict(report),
+        ) from error
+
+
+async def generate_memorial_gas_natural_v1_from_uploaded_files(
+    files: list[UploadedFile],
+    output_path: Path,
+) -> PipelineResult:
+    ingestion_result = await ingest_uploaded_files(files)
+    try:
+        return generate_memorial_gas_natural_v1_from_ingested_files(
             ingestion_result.files,
             output_path,
         )
