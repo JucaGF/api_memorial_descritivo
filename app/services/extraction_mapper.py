@@ -553,6 +553,85 @@ def _extract_telecom_qtd_restaurantes(text: str) -> FieldExtraction | None:
     return None
 
 
+def _extract_glp_quantity_from_patterns(
+    text: str,
+    patterns: tuple[str, ...],
+    rule: str,
+) -> FieldExtraction | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return FieldExtraction(
+                value=int(match.group(1)),
+                evidence=match.group(0),
+                rule=rule,
+                confidence="medium",
+            )
+    return None
+
+
+def _extract_glp_qtd_fogao(text: str) -> FieldExtraction | None:
+    return _extract_glp_quantity_from_patterns(
+        text=text,
+        patterns=(
+            r"(\d+)\s*fog(?:[ãa]o|[õo]es?)\b",
+            r"fog(?:[ãa]o|[õo]es?)\s*[:\-]?\s*(\d+)\b",
+        ),
+        rule="glp_fogao_count_regex",
+    )
+
+
+def _extract_glp_qtd_aquecedor(text: str) -> FieldExtraction | None:
+    extraction = _extract_glp_quantity_from_patterns(
+        text=text,
+        patterns=(
+            r"(\d+)\s*aquecedores?\b",
+            r"aquecedores?\s*[:\-]?\s*(\d+)\b",
+        ),
+        rule="glp_heater_count_regex",
+    )
+    if extraction is not None:
+        return extraction
+
+    if "aquecedor" not in text.lower() and "aquecedores" not in text.lower():
+        return FieldExtraction(
+            value=0,
+            evidence="nenhuma ocorrência de aquecedor no texto extraído do projeto",
+            rule="glp_no_heater_default",
+            confidence="low",
+        )
+    return None
+
+
+def _extract_glp_qtd_churrasqueira(text: str) -> FieldExtraction | None:
+    return _extract_glp_quantity_from_patterns(
+        text=text,
+        patterns=(
+            r"(\d+)\s*churrasqueiras?\b",
+            r"churrasqueiras?\s*[:\-]?\s*(\d+)\b",
+        ),
+        rule="glp_churrasqueira_count_regex",
+    )
+
+
+def _extract_glp_total_points_from_quantitative_tables(text: str) -> FieldExtraction | None:
+    matches = re.findall(
+        r"\(\s*\d+\s*PAV[^)]*?=\s*(\d+)\s*PONTOS\s*\)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not matches:
+        return None
+
+    totals = [int(value) for value in matches]
+    return FieldExtraction(
+        value=sum(totals),
+        evidence=" + ".join(matches),
+        rule="glp_quantitative_table_points_sum",
+        confidence="high",
+    )
+
+
 def _extract_nao_inclusos(raw_text: str) -> dict[str, FieldExtraction]:
     """Detecta sistemas especializados por label de quadro.
     Presença de circuito → False (incluído). Ausência → True (não incluso).
@@ -927,5 +1006,13 @@ def map_extraction_to_partial_glp_context(
     add("obra.localizacao", _extract_localizacao(raw_text))
     add("obra.numero_cadastro", _extract_numero_cadastro(raw_text))
     add("obra.qtd_apartamentos", _extract_qtd_apartamentos(text))
+    add("obra.tipo_edificacao", _extract_telecom_tipo_edificacao(text))
+    add("obra.tipologia", _extract_telecom_tipologia(text))
+    add("obra.qtd_lojas", _extract_telecom_qtd_lojas(text))
+    add("obra.qtd_restaurantes", _extract_telecom_qtd_restaurantes(text))
+    add("dimensionamento.qtd_fogao", _extract_glp_qtd_fogao(text))
+    add("dimensionamento.qtd_aquecedor", _extract_glp_qtd_aquecedor(text))
+    add("dimensionamento.qtd_churrasqueira", _extract_glp_qtd_churrasqueira(text))
+    add("soma.qtd_pontos_de_utilizacao", _extract_glp_total_points_from_quantitative_tables(raw_text))
 
     return MappingResult(context=context, evidence=evidence)

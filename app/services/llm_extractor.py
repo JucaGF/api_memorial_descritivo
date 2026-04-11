@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from app.services.project_extractor import ExtractedSourceFile
 
 logger = logging.getLogger(__name__)
+GLP_TEXT_ONLY_THRESHOLD = 4000
 
 
 # ── Extraction schema ─────────────────────────────────────────────────────────
@@ -338,7 +339,7 @@ Look for the total utilization points.
 
 ### ramal
 Look for internal primary branch details.
-- primario_diametro
+- primario_diametro: ALWAYS return the diameter in millimeters. If the drawing shows inches such as `1 1/4"`, convert to mm before returning the value.
 - primario_material
 - primario_pavimento
 
@@ -358,6 +359,7 @@ Look for the sheet number associated with the relevant cut/detail.
 - Return null for any field without sufficient evidence.
 - NEVER invent or guess values.
 - Numeric fields must be numbers, not strings.
+- For `ramal.primario_diametro`, output the numeric value in millimeters even if the source notation is in inches.
 - In observacoes, briefly note ambiguities or extraction limitations.
 """
 
@@ -611,6 +613,20 @@ def _build_glp_text_only_input(source_file: ExtractedSourceFile) -> list[dict[st
     ]}]
 
 
+def _build_glp_combined_text_input(
+    source_files: list[ExtractedSourceFile],
+) -> list[dict[str, Any]]:
+    sections = [
+        f"=== FILE: {source_file.original_filename} ===\n{source_file.extracted_text}"
+        for source_file in source_files
+        if source_file.extracted_text.strip()
+    ]
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": GLP_EXTRACTION_PROMPT},
+        {"type": "input_text", "text": "\n\n".join(sections)},
+    ]}]
+
+
 def _build_merge_input(
     per_file_results: list[tuple[str, dict[str, Any]]],
 ) -> list[dict[str, Any]]:
@@ -798,9 +814,11 @@ def _extract_glp_single_file(
     source_file: ExtractedSourceFile,
 ) -> dict[str, Any]:
     has_images = bool(source_file.page_images)
+    use_text_only = bool(source_file.extracted_text.strip()) and len(source_file.extracted_text) >= GLP_TEXT_ONLY_THRESHOLD
     input_messages = (
-        _build_glp_vision_input(source_file) if has_images
-        else _build_glp_text_only_input(source_file)
+        _build_glp_text_only_input(source_file)
+        if use_text_only or not has_images
+        else _build_glp_vision_input(source_file)
     )
 
     kwargs: dict[str, Any] = {
@@ -808,10 +826,25 @@ def _extract_glp_single_file(
         "input": input_messages,
         "text_format": GlpLLMExtraction,
     }
-    if has_images:
+    if has_images and not use_text_only:
         kwargs["reasoning"] = {"effort": "high"}
 
     response = client.responses.parse(**kwargs)
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _extract_glp_combined_text(
+    client: Any,
+    model: str,
+    source_files: list[ExtractedSourceFile],
+) -> dict[str, Any]:
+    response = client.responses.parse(
+        model=model,
+        input=_build_glp_combined_text_input(source_files),
+        text_format=GlpLLMExtraction,
+    )
     if response.output_parsed is None:
         return {}
     return response.output_parsed.model_dump(mode="json")
@@ -1025,6 +1058,17 @@ def extract_glp_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, A
     logger.info("GLP LLM vision extraction: model=%s, files=%d", model, len(usable_files))
 
     t0 = time.monotonic()
+    if len(usable_files) > 1 and all(
+        sf.extracted_text.strip() and len(sf.extracted_text) >= GLP_TEXT_ONLY_THRESHOLD
+        for sf in usable_files
+    ):
+        logger.info("Using single combined GLP text extraction for %d files", len(usable_files))
+        merged = _extract_glp_combined_text(client, model, usable_files)
+        merged.pop("observacoes", None)
+        elapsed = time.monotonic() - t0
+        logger.info("GLP combined text extraction complete: fields=%d, elapsed=%.1fs", _count_non_null_fields(merged), elapsed)
+        return merged
+
     per_file_results: list[tuple[str, dict[str, Any]]] = []
 
     for sf in usable_files:

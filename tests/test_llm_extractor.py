@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from app.services.llm_extractor import (
     EnergiaExtraction,
     GasNaturalLLMExtraction,
+    GlpLLMExtraction,
     GeradorExtraction,
     InstalacaoExtraction,
     LLMExtraction,
@@ -15,12 +16,15 @@ from app.services.llm_extractor import (
     TelecomLLMExtraction,
     _build_gas_natural_text_only_input,
     _build_gas_natural_vision_input,
+    _build_glp_text_only_input,
+    _build_glp_vision_input,
     _build_telecom_text_only_input,
     _build_telecom_vision_input,
     _build_text_only_input,
     _build_vision_input,
     _first_non_null_merge,
     extract_gas_natural_with_llm,
+    extract_glp_with_llm,
     extract_telecom_with_llm,
     extract_with_llm,
     is_llm_extraction_enabled,
@@ -203,6 +207,28 @@ class VisionInputTests(unittest.TestCase):
     def test_build_gas_natural_text_only_input_has_no_images(self) -> None:
         sf = _source_file(text="Some gas natural text")
         messages = _build_gas_natural_text_only_input(sf)
+
+        content = messages[0]["content"]
+        image_parts = [p for p in content if p.get("type") == "input_image"]
+        self.assertEqual(len(image_parts), 0)
+
+    def test_build_glp_vision_input_includes_images_and_text(self) -> None:
+        sf = _source_file(
+            text="OCR glp text",
+            page_images=["data:image/png;base64,AAA"],
+        )
+        messages = _build_glp_vision_input(sf)
+
+        content = messages[0]["content"]
+        image_parts = [p for p in content if p["type"] == "input_image"]
+        text_parts = [p for p in content if p["type"] == "input_text"]
+
+        self.assertEqual(len(image_parts), 1)
+        self.assertTrue(any("OCR glp text" in p["text"] for p in text_parts))
+
+    def test_build_glp_text_only_input_has_no_images(self) -> None:
+        sf = _source_file(text="Some glp text")
+        messages = _build_glp_text_only_input(sf)
 
         content = messages[0]["content"]
         image_parts = [p for p in content if p.get("type") == "input_image"]
@@ -473,6 +499,79 @@ class ExtractWithLLMTests(unittest.TestCase):
         self.assertEqual(mock_client.responses.parse.call_count, 3)
         self.assertEqual(result["obra"]["construtora"], "Alpha")
         self.assertEqual(result["valvula"]["esfera_diametro"], "32 mm")
+
+    def test_extract_glp_returns_empty_when_disabled(self) -> None:
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
+            result = extract_glp_with_llm([_source_file()])
+        self.assertEqual(result, {})
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_glp_rich_text_pdf_prefers_text_only_input(self, _model_mock, client_mock) -> None:
+        mock_parsed = GlpLLMExtraction(obra=ObraExtraction(construtora="GLP Textual"))
+        mock_response = MagicMock()
+        mock_response.output_parsed = mock_parsed
+        mock_client = MagicMock()
+        mock_client.responses.parse.return_value = mock_response
+        client_mock.return_value = mock_client
+
+        sf = _source_file(
+            text="GLP " * 1000,
+            page_images=["data:image/png;base64,AAA"],
+        )
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            extract_glp_with_llm([sf])
+
+        kwargs = mock_client.responses.parse.call_args.kwargs
+        content = kwargs["input"][0]["content"]
+        self.assertFalse(any(part.get("type") == "input_image" for part in content))
+        self.assertNotIn("reasoning", kwargs)
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_glp_short_text_pdf_keeps_vision_input(self, _model_mock, client_mock) -> None:
+        mock_parsed = GlpLLMExtraction(obra=ObraExtraction(construtora="GLP Visual"))
+        mock_response = MagicMock()
+        mock_response.output_parsed = mock_parsed
+        mock_client = MagicMock()
+        mock_client.responses.parse.return_value = mock_response
+        client_mock.return_value = mock_client
+
+        sf = _source_file(
+            text="texto curto",
+            page_images=["data:image/png;base64,AAA"],
+        )
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            extract_glp_with_llm([sf])
+
+        kwargs = mock_client.responses.parse.call_args.kwargs
+        content = kwargs["input"][0]["content"]
+        self.assertTrue(any(part.get("type") == "input_image" for part in content))
+        self.assertIn("reasoning", kwargs)
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_glp_multiple_rich_text_files_use_single_combined_extraction(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        mock_parsed = GlpLLMExtraction(obra=ObraExtraction(construtora="GLP Combined"))
+        mock_response = MagicMock()
+        mock_response.output_parsed = mock_parsed
+        mock_client = MagicMock()
+        mock_client.responses.parse.return_value = mock_response
+        client_mock.return_value = mock_client
+
+        files = [
+            _source_file("a.pdf", "GLP " * 1000, ["data:image/png;base64,AAA"]),
+            _source_file("b.pdf", "GLP " * 1000, ["data:image/png;base64,BBB"]),
+        ]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_glp_with_llm(files)
+
+        self.assertEqual(mock_client.responses.parse.call_count, 1)
+        self.assertEqual(result["obra"]["construtora"], "GLP Combined")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from app.services.session_store import ReviewSession
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES_DIR = ROOT / "tests" / "fixtures"
+PROJECTS_DIR = ROOT / "projects"
 
 
 def load_fixture(filename: str) -> dict:
@@ -488,6 +489,83 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["detail"], "Payload invalido para o memorial gas natural v1.")
         self.assertTrue(body["errors"])
         self.assertEqual(body["errors"][0]["path"], "$.crm")
+
+    def test_post_memorial_glp_from_real_project_files_requires_llm_extraction(self) -> None:
+        project_dir = PROJECTS_DIR / "gas-glp"
+        pdf_paths = sorted(project_dir.glob("*.pdf"))
+        self.assertTrue(pdf_paths, "Expected PDF fixtures in projects/gas-glp")
+
+        file_handles = []
+        try:
+            for pdf_path in pdf_paths:
+                file_handles.append(("files", (pdf_path.name, pdf_path.open("rb"), "application/pdf")))
+
+            with patch.dict("os.environ", {"USE_LLM_EXTRACTION": ""}):
+                response = self.client.post(
+                    "/api/v1/memoriais/glp/from-files",
+                    files=file_handles,
+                )
+        finally:
+            for _, (_, file_obj, _) in file_handles:
+                file_obj.close()
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("LLM", response.json()["detail"])
+
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    def test_post_memorial_glp_from_real_project_files_returns_docx_with_llm_context(
+        self,
+        llm_mock,
+    ) -> None:
+        project_dir = PROJECTS_DIR / "gas-glp"
+        pdf_paths = sorted(project_dir.glob("*.pdf"))
+        self.assertTrue(pdf_paths, "Expected PDF fixtures in projects/gas-glp")
+
+        payload = load_fixture("glp_base.json")
+        llm_mock.return_value = {
+            "obra": {
+                "construtora": payload["obra"]["construtora"],
+                "nome": payload["obra"]["nome"],
+                "localizacao": payload["obra"]["localizacao"],
+                "numero_cadastro": payload["obra"]["numero_cadastro"],
+                "qtd_apartamentos": payload["obra"]["qtd_apartamentos"],
+                "tipo_edificacao": None,
+                "tipologia": None,
+                "qtd_lojas": None,
+                "qtd_restaurantes": None,
+            },
+            "abastecimento": payload["abastecimento"],
+            "dimensionamento": {
+                "qtd_fogao": payload["dimensionamento"]["qtd_fogao"],
+                "qtd_aquecedor": None,
+                "qtd_churrasqueira": payload["dimensionamento"]["qtd_churrasqueira"],
+            },
+            "soma": payload["soma"],
+            "ramal": payload["ramal"],
+            "numero": payload["numero"],
+            "teto_ou_piso": payload["teto_ou_piso"],
+        }
+
+        file_handles = []
+        try:
+            for pdf_path in pdf_paths:
+                file_handles.append(("files", (pdf_path.name, pdf_path.open("rb"), "application/pdf")))
+
+            with patch.dict("os.environ", {"USE_LLM_EXTRACTION": "true"}):
+                response = self.client.post(
+                    "/api/v1/memoriais/glp/from-files",
+                    files=file_handles,
+                )
+        finally:
+            for _, (_, file_obj, _) in file_handles:
+                file_obj.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertTrue(response.content.startswith(b"PK"))
 
 
 def _build_pending_session(session_id: str) -> ReviewSession:

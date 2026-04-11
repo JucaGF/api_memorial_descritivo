@@ -14,13 +14,17 @@ from app.services.file_ingestion import FileIngestionResult, IngestedFileMetadat
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
 from app.services.pipeline_from_files import (
+    _parse_diameter_mm,
+    _normalize_glp_context,
     _fill_gaps,
     extract_mapping_from_ingested_files,
+    extract_glp_mapping_from_ingested_files,
     extract_gas_natural_mapping_from_ingested_files,
     extract_telecom_mapping_from_ingested_files,
     generate_memorial_eletrico_v1_from_ingested_files,
     generate_memorial_gas_natural_v1_from_ingested_files,
     generate_memorial_gas_natural_v1_from_uploaded_files,
+    generate_memorial_glp_v1_from_ingested_files,
     generate_memorial_telecom_v1_from_ingested_files,
     generate_memorial_telecom_v1_from_uploaded_files,
     generate_memorial_eletrico_v1_from_uploaded_files,
@@ -276,6 +280,370 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Gas")
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
 
+    @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_mapper_supplements_llm_gaps(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        llm_context = {
+            "obra": {
+                "construtora": "LLM GLP",
+                "nome": "Edifício LLM",
+                "tipo_edificacao": None,
+                "tipologia": None,
+                "qtd_lojas": None,
+                "qtd_restaurantes": None,
+            },
+            "dimensionamento": {"qtd_aquecedor": None},
+        }
+        mapper_mapping = build_mapping_result(
+            {
+                "obra": {
+                    "tipo_edificacao": "Residencial Multifamiliar",
+                    "tipologia": "Subsolo, térreo, 8 pavimentos, cobertura",
+                    "qtd_lojas": 0,
+                    "qtd_restaurantes": 0,
+                },
+                "dimensionamento": {"qtd_aquecedor": 0},
+            }
+        )
+        report = build_extraction_report()
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = llm_context
+        map_mock.return_value = mapper_mapping
+        assess_mock.return_value = report
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, _ = extract_glp_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM GLP")
+        self.assertEqual(result_mapping.context["obra"]["tipo_edificacao"], "Residencial Multifamiliar")
+        self.assertEqual(result_mapping.context["obra"]["qtd_lojas"], 0)
+        self.assertEqual(result_mapping.context["dimensionamento"]["qtd_aquecedor"], 0)
+
+    @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_mapper_extracts_appliance_counts_from_ocr_text_and_reconciles_total_points(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = ProjectExtractionResult(
+            raw_text=(
+                "DIMENSIONAMENTO GLP\n"
+                "56 fogões\n"
+                "0 aquecedores\n"
+                "5 churrasqueiras\n"
+            ),
+            source_files=[],
+            signals={"total_files": 1},
+        )
+        llm_context = {
+            "obra": {"construtora": "LLM GLP"},
+            "dimensionamento": {
+                "qtd_fogao": None,
+                "qtd_aquecedor": None,
+                "qtd_churrasqueira": None,
+            },
+            "soma": {"qtd_pontos_de_utilizacao": 999},
+        }
+        report = build_extraction_report()
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = llm_context
+        assess_mock.return_value = report
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, _ = extract_glp_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["dimensionamento"]["qtd_fogao"], 56)
+        self.assertEqual(result_mapping.context["dimensionamento"]["qtd_aquecedor"], 0)
+        self.assertEqual(result_mapping.context["dimensionamento"]["qtd_churrasqueira"], 5)
+        self.assertEqual(result_mapping.context["soma"]["qtd_pontos_de_utilizacao"], 61)
+        self.assertEqual(result_mapping.evidence["dimensionamento.qtd_fogao"].value, 56)
+        self.assertEqual(result_mapping.evidence["dimensionamento.qtd_aquecedor"].value, 0)
+        self.assertEqual(result_mapping.evidence["dimensionamento.qtd_churrasqueira"].value, 5)
+
+    @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_mapper_does_not_default_to_zero_for_appliance_mentions_without_numeric_evidence(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = ProjectExtractionResult(
+            raw_text=(
+                "DIMENSIONAMENTO GLP\n"
+                "fogões previstos em projeto\n"
+            ),
+            source_files=[],
+            signals={"total_files": 1},
+        )
+        llm_context = {
+            "obra": {"construtora": "LLM GLP"},
+            "dimensionamento": {
+                "qtd_fogao": None,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 5,
+            },
+            "soma": {"qtd_pontos_de_utilizacao": 999},
+        }
+        report = build_extraction_report()
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = llm_context
+        assess_mock.return_value = report
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, _ = extract_glp_mapping_from_ingested_files(ingested_files)
+
+        self.assertIsNone(result_mapping.context["dimensionamento"].get("qtd_fogao"))
+        self.assertNotIn("dimensionamento.qtd_fogao", result_mapping.evidence)
+        self.assertEqual(result_mapping.context["soma"]["qtd_pontos_de_utilizacao"], 999)
+
+    def test_normalize_glp_context_converts_fractional_inches_to_millimeters(self) -> None:
+        context = {"ramal": {"primario_diametro": '1 1/4"'}}
+
+        normalized = _normalize_glp_context(context)
+
+        self.assertEqual(normalized["ramal"]["primario_diametro"], 31.8)
+
+    def test_parse_diameter_mm_rejects_boolean_values(self) -> None:
+        self.assertIsNone(_parse_diameter_mm(True))
+        self.assertIsNone(_parse_diameter_mm(False))
+
+    def test_normalize_glp_context_preserves_already_mm_string_input(self) -> None:
+        context = {"ramal": {"primario_diametro": "32 mm"}}
+
+        normalized = _normalize_glp_context(context)
+
+        self.assertEqual(normalized["ramal"]["primario_diametro"], 32.0)
+
+    def test_normalize_glp_context_preserves_total_points_when_dimensionamento_is_incomplete(
+        self,
+    ) -> None:
+        cases = [
+            {"qtd_fogao": 56, "qtd_aquecedor": None, "qtd_churrasqueira": 5},
+            {"qtd_fogao": 56, "qtd_aquecedor": "0", "qtd_churrasqueira": 5},
+        ]
+
+        for dimensionamento in cases:
+            with self.subTest(dimensionamento=dimensionamento):
+                context = {
+                    "dimensionamento": dimensionamento,
+                    "soma": {"qtd_pontos_de_utilizacao": 999},
+                }
+
+                normalized = _normalize_glp_context(context)
+
+                self.assertEqual(normalized["soma"]["qtd_pontos_de_utilizacao"], 999)
+
+    def test_normalize_glp_context_leaves_unknown_ramal_location_values_unchanged(self) -> None:
+        context = {
+            "ramal": {"primario_pavimento": "Mezanino"},
+            "teto_ou_piso": "Cobertura técnica",
+        }
+
+        normalized = _normalize_glp_context(context)
+
+        self.assertEqual(normalized["ramal"]["primario_pavimento"], "Mezanino")
+        self.assertEqual(normalized["teto_ou_piso"], "Cobertura técnica")
+
+    def test_normalize_glp_context_canonicalizes_known_ramal_location_values(self) -> None:
+        context = {
+            "ramal": {"primario_pavimento": "TERREO"},
+            "teto_ou_piso": "PISO",
+        }
+
+        normalized = _normalize_glp_context(context)
+
+        self.assertEqual(normalized["ramal"]["primario_pavimento"], "térreo")
+        self.assertEqual(normalized["teto_ou_piso"], "piso")
+
+    @patch("app.services.pipeline_from_files.generate_memorial_glp_v1")
+    @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_pipeline_stops_before_render_when_total_points_conflict_is_unresolved(
+        self,
+        extract_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+        generate_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        output_path = ROOT / "tests" / "output" / "pipeline_from_files_glp_unresolved_conflict.docx"
+
+        extract_mock.return_value = extraction_result
+        extract_llm_mock.return_value = {
+            "obra": {"construtora": "LLM GLP"},
+            "dimensionamento": {
+                "qtd_fogao": 56,
+                "qtd_aquecedor": None,
+                "qtd_churrasqueira": 5,
+            },
+            "soma": {"qtd_pontos_de_utilizacao": 10},
+        }
+        map_mock.return_value = MappingResult(context={}, evidence={})
+        assess_mock.return_value = build_extraction_report()
+        generate_mock.return_value = PipelineResult(context={}, output_path=output_path)
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            with self.assertRaises(MemorialValidationError) as ctx:
+                generate_memorial_glp_v1_from_ingested_files(ingested_files, output_path)
+
+        generate_mock.assert_not_called()
+        self.assertEqual(len(ctx.exception.issues), 1)
+        self.assertEqual(ctx.exception.issues[0].path, "$.soma.qtd_pontos_de_utilizacao")
+        self.assertEqual(ctx.exception.issues[0].validator, "glp_conflict")
+        self.assertIsNotNone(ctx.exception.extraction_report)
+        self.assertEqual(
+            ctx.exception.extraction_report["conflicts"],
+            [
+                {
+                    "type": "glp_total_points_conflict",
+                    "status": "unresolved",
+                    "field": "soma.qtd_pontos_de_utilizacao",
+                    "reported_total": 10,
+                    "dimensionamento_counts": {
+                        "qtd_fogao": 56,
+                        "qtd_aquecedor": None,
+                        "qtd_churrasqueira": 5,
+                    },
+                    "known_dimensionamento_total": 61,
+                    "deterministic_total": None,
+                    "reason": "dimensionamento_incomplete",
+                }
+            ],
+        )
+
+    @patch("app.services.pipeline_from_files.generate_memorial_glp_v1")
+    @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_pipeline_records_resolved_total_points_conflict_in_error_report(
+        self,
+        extract_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+        generate_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        report = build_extraction_report()
+        output_path = ROOT / "tests" / "output" / "pipeline_from_files_glp_resolved_conflict.docx"
+
+        extract_mock.return_value = extraction_result
+        extract_llm_mock.return_value = {
+            "obra": {"construtora": "LLM GLP"},
+            "dimensionamento": {
+                "qtd_fogao": 56,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 5,
+            },
+            "soma": {"qtd_pontos_de_utilizacao": 999},
+        }
+        map_mock.return_value = MappingResult(context={}, evidence={})
+        assess_mock.return_value = report
+        generate_mock.side_effect = MemorialValidationError(
+            [ValidationIssue(path="$.obra", message="'tipologia' is a required property", validator="required")]
+        )
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            with self.assertRaises(MemorialValidationError) as ctx:
+                generate_memorial_glp_v1_from_ingested_files(ingested_files, output_path)
+
+        generate_mock.assert_called_once()
+        called_context = generate_mock.call_args.args[0]
+        self.assertEqual(called_context["soma"]["qtd_pontos_de_utilizacao"], 61)
+        self.assertIsNotNone(ctx.exception.extraction_report)
+        self.assertEqual(
+            ctx.exception.extraction_report["conflicts"],
+            [
+                {
+                    "type": "glp_total_points_conflict",
+                    "status": "resolved",
+                    "field": "soma.qtd_pontos_de_utilizacao",
+                    "reported_total": 999,
+                    "dimensionamento_counts": {
+                        "qtd_fogao": 56,
+                        "qtd_aquecedor": 0,
+                        "qtd_churrasqueira": 5,
+                    },
+                    "known_dimensionamento_total": 61,
+                    "deterministic_total": 61,
+                    "reason": "dimensionamento_complete",
+                }
+            ],
+        )
+
+    @patch("app.services.pipeline_from_files.generate_memorial_glp_v1")
+    @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_pipeline_prefers_table_sum_for_total_points_over_conflicting_isolated_value(
+        self,
+        extract_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+        generate_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        output_path = ROOT / "tests" / "output" / "pipeline_from_files_glp_total_points.docx"
+
+        extract_mock.return_value = extraction_result
+        extract_llm_mock.return_value = {
+            "obra": {"construtora": "LLM GLP"},
+            "dimensionamento": {
+                "qtd_fogao": 56,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 5,
+            },
+            "soma": {"qtd_pontos_de_utilizacao": 999},
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_material": "aco carbono",
+                "primario_pavimento": "TERREO",
+            },
+            "numero": {"prancha": "05/05"},
+            "teto_ou_piso": "TETO",
+        }
+        map_mock.return_value = MappingResult(context={}, evidence={})
+        assess_mock.return_value = build_extraction_report()
+        generate_mock.return_value = PipelineResult(context={}, output_path=output_path)
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            generate_memorial_glp_v1_from_ingested_files(ingested_files, output_path)
+
+        called_context = generate_mock.call_args.args[0]
+        self.assertEqual(called_context["soma"]["qtd_pontos_de_utilizacao"], 61)
+        self.assertEqual(called_context["dimensionamento"]["qtd_fogao"], 56)
+        self.assertEqual(called_context["dimensionamento"]["qtd_aquecedor"], 0)
+        self.assertEqual(called_context["dimensionamento"]["qtd_churrasqueira"], 5)
+
 
 class GenerateFromIngestedFilesTests(unittest.TestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_eletrico_v1")
@@ -453,6 +821,47 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
             generate_memorial_gas_natural_v1_from_ingested_files(ingested_files, output_path)
 
         self.assertIsNotNone(ctx.exception.extraction_report)
+
+    @patch("app.services.pipeline_from_files.generate_memorial_glp_v1")
+    @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_runs_glp_pipeline_with_ramal_diameter_normalized_to_millimeters(
+        self,
+        extract_mock,
+        extract_llm_mock,
+        map_mock,
+        assess_mock,
+        generate_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = build_extraction_result()
+        report = build_extraction_report()
+        output_path = ROOT / "tests" / "output" / "pipeline_from_files_glp.docx"
+
+        extract_mock.return_value = extraction_result
+        extract_llm_mock.return_value = {
+            "obra": {"construtora": "LLM GLP"},
+            "abastecimento": {"qtd_tanques": 2, "pavimento": "terreo"},
+            "dimensionamento": {"qtd_fogao": 56, "qtd_aquecedor": 0, "qtd_churrasqueira": 5},
+            "soma": {"qtd_pontos_de_utilizacao": 61},
+            "ramal": {"primario_diametro": '1 1/4"', "primario_material": "aco carbono", "primario_pavimento": "subsolo"},
+            "numero": {"prancha": "05/05"},
+            "teto_ou_piso": "teto",
+        }
+        map_mock.return_value = build_mapping_result()
+        assess_mock.return_value = report
+        generate_mock.return_value = PipelineResult(
+            context={},
+            output_path=output_path,
+        )
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            generate_memorial_glp_v1_from_ingested_files(ingested_files, output_path)
+
+        called_context = generate_mock.call_args.args[0]
+        self.assertEqual(called_context["ramal"]["primario_diametro"], 31.8)
 
 
 class GenerateFromUploadedFilesTests(unittest.IsolatedAsyncioTestCase):
