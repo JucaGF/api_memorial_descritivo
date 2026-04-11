@@ -9,6 +9,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 ELETRICO_V1_TEMPLATE_PATH = ROOT_DIR / "templates" / "eletrico" / "v1" / "template.docx"
 TELECOM_V1_TEMPLATE_PATH = ROOT_DIR / "templates" / "telecom" / "v1" / "template.docx"
 GAS_NATURAL_V1_TEMPLATE_PATH = ROOT_DIR / "templates" / "gas_natural" / "v1" / "template.docx"
+GLP_V1_TEMPLATE_PATH = ROOT_DIR / "templates" / "glp" / "v1" / "template.docx"
 FORBIDDEN_JINJA_TOKENS = ("{{", "}}", "{%", "%}")
 FORBIDDEN_INTERNAL_MARKERS = (
     "Fixo",
@@ -107,6 +108,25 @@ def render_memorial_gas_natural_v1(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     document = DocxTemplate(str(GAS_NATURAL_V1_TEMPLATE_PATH))
+    document.render(context)
+    document.save(str(output_path))
+
+    rendered_text = inspect_docx_text(output_path)
+    assert_no_jinja_left(rendered_text)
+    assert_no_internal_markers_left(rendered_text)
+    return output_path
+
+
+def render_memorial_glp_v1(
+    context: dict[str, Any],
+    output_path: Path,
+) -> Path:
+    _require_docx_dependencies()
+    from docxtpl import DocxTemplate
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    document = DocxTemplate(str(GLP_V1_TEMPLATE_PATH))
     document.render(context)
     document.save(str(output_path))
 

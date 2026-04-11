@@ -96,3 +96,13 @@ def build_memorial_gas_natural_v1_context(input_payload: dict[str, Any]) -> dict
     context["documento"] = documento
 
     return context
+
+
+def build_memorial_glp_v1_context(input_payload: dict[str, Any]) -> dict[str, Any]:
+    context = deepcopy(input_payload)
+
+    documento = _ensure_dict(context, "documento")
+    documento.setdefault("data_atual", date.today().strftime("%d/%m/%Y"))
+    context["documento"] = documento
+
+    return context

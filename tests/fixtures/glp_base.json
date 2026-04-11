@@ -1,0 +1,37 @@
+{
+  "documento": {
+    "data_atual": "10/04/2026"
+  },
+  "obra": {
+    "numero_cadastro": "5678/2026",
+    "construtora": "Exemplo Engenharia LTDA",
+    "nome": "Residencial Exemplo GLP",
+    "localizacao": "Rua Exemplo, 100 - Recife/PE",
+    "tipo_edificacao": "residencial",
+    "tipologia": "torre única",
+    "qtd_apartamentos": 32,
+    "qtd_lojas": 0,
+    "qtd_restaurantes": 0
+  },
+  "abastecimento": {
+    "qtd_tanques": 2,
+    "pavimento": "térreo"
+  },
+  "dimensionamento": {
+    "qtd_fogao": 32,
+    "qtd_aquecedor": 32,
+    "qtd_churrasqueira": 0
+  },
+  "soma": {
+    "qtd_pontos_de_utilizacao": 64
+  },
+  "ramal": {
+    "primario_diametro": 32,
+    "primario_material": "aço carbono",
+    "primario_pavimento": "térreo"
+  },
+  "numero": {
+    "prancha": "01/05"
+  },
+  "teto_ou_piso": "teto"
+}

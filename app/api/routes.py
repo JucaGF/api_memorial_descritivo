@@ -26,11 +26,13 @@ from app.services.memorial_validator import MemorialValidationError
 from app.services.pipeline import (
     generate_memorial_eletrico_v1,
     generate_memorial_gas_natural_v1,
+    generate_memorial_glp_v1,
     generate_memorial_telecom_v1,
 )
 from app.services.pipeline_from_files import (
     extract_mapping_from_ingested_files,
     generate_memorial_gas_natural_v1_from_uploaded_files,
+    generate_memorial_glp_v1_from_uploaded_files,
     generate_memorial_telecom_v1_from_uploaded_files,
     generate_memorial_eletrico_v1_from_uploaded_files,
 )
@@ -185,6 +187,32 @@ def create_memorial_gas_natural(
         )
 
     return _docx_file_response(output_path, background_tasks, "memorial_gas_natural_v1.docx")
+
+
+@router.post("/api/v1/memoriais/glp")
+def create_memorial_glp(
+    payload: dict[str, Any],
+    background_tasks: BackgroundTasks,
+):
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        generate_memorial_glp_v1(payload, output_path)
+    except MemorialValidationError as error:
+        _remove_file(output_path)
+        return _validation_error_response(error, "Payload invalido para o memorial GLP v1.")
+    except MemorialRenderError as error:
+        _remove_file(output_path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Falha ao renderizar o memorial GLP v1.",
+                "error": str(error),
+            },
+        )
+
+    return _docx_file_response(output_path, background_tasks, "memorial_glp_v1.docx")
 
 
 @router.post(
@@ -367,6 +395,60 @@ async def create_memorial_gas_natural_from_files(
         )
 
     return _docx_file_response(output_path, background_tasks, "memorial_gas_natural_v1.docx")
+
+
+@router.post(
+    "/api/v1/memoriais/glp/upload",
+    response_model=FileIngestionResponse,
+)
+async def upload_memorial_glp_files(
+    files: list[UploadFile] | None = File(default=None),
+):
+    result = None
+    try:
+        result = await ingest_uploaded_files(files or [])
+    except FileIngestionError as error:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": error.detail},
+        )
+    finally:
+        if result is not None:
+            cleanup_ingestion_result(result)
+
+    return _file_ingestion_response(result)
+
+
+@router.post("/api/v1/memoriais/glp/from-files")
+async def create_memorial_glp_from_files(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] | None = File(default=None),
+):
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        await generate_memorial_glp_v1_from_uploaded_files(files or [], output_path)
+    except MemorialValidationError as error:
+        _remove_file(output_path)
+        return _validation_error_response(error, "Payload invalido para o memorial GLP v1.")
+    except (FileIngestionError, ProjectExtractionError) as error:
+        _remove_file(output_path)
+        return JSONResponse(
+            status_code=400,
+            content={"detail": str(error)},
+        )
+    except MemorialRenderError as error:
+        _remove_file(output_path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Falha ao renderizar o memorial GLP v1.",
+                "error": str(error),
+            },
+        )
+
+    return _docx_file_response(output_path, background_tasks, "memorial_glp_v1.docx")
 
 
 # ── Fluxo de revisão manual ──────────────────────────────────────────────────

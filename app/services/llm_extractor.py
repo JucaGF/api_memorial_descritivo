@@ -129,6 +129,22 @@ class GasNaturalLLMExtraction(BaseModel):
     observacoes: str | None = None
 
 
+class AbastecimentoExtraction(BaseModel):
+    qtd_tanques: int | None = None
+    pavimento: str | None = None
+
+
+class GlpLLMExtraction(BaseModel):
+    obra: ObraExtraction = ObraExtraction()
+    abastecimento: AbastecimentoExtraction = AbastecimentoExtraction()
+    dimensionamento: DimensionamentoExtraction = DimensionamentoExtraction()
+    soma: SomaExtraction = SomaExtraction()
+    ramal: RamalExtraction = RamalExtraction()
+    numero: NumeroExtraction = NumeroExtraction()
+    teto_ou_piso: str | None = None
+    observacoes: str | None = None
+
+
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 EXTRACTION_PROMPT = """\
@@ -363,6 +379,83 @@ Rules:
 Per-file extractions:
 """
 
+GLP_EXTRACTION_PROMPT = """\
+You are an expert structured data extractor for Brazilian GLP (liquefied petroleum gas) engineering projects.
+
+You will receive page images from GLP project drawings and memorial-related files, along with \
+supplementary OCR text. The images are the PRIMARY source of truth. Use OCR text only to confirm \
+or complement what is visible.
+
+Your job is to extract ONLY the fields required by the GLP memorial v1 contract.
+
+## Where to look for each field
+
+### obra
+Look at the title block, cover sheet, or project notes.
+- construtora
+- nome
+- localizacao
+- numero_cadastro
+- tipo_edificacao
+- tipologia
+- qtd_apartamentos
+- qtd_lojas
+- qtd_restaurantes
+
+### abastecimento
+Look for the GLP tank area drawing, tank specifications, or supply description.
+- qtd_tanques: number of GLP tanks (typically P-190 type)
+- pavimento: floor/level where the GLP tank shelter is located
+
+### dimensionamento
+Look for appliance count tables or design notes.
+- qtd_fogao
+- qtd_aquecedor
+- qtd_churrasqueira
+
+### soma
+Look for the total utilization points.
+- qtd_pontos_de_utilizacao
+
+### ramal
+Look for internal primary branch details.
+- primario_diametro
+- primario_material
+- primario_pavimento
+
+### numero
+Look for the sheet number associated with the relevant cut/detail.
+- prancha
+
+### raiz
+- teto_ou_piso
+
+## Rules
+- Extract ONLY from evidence visible in the images or OCR text.
+- Return null for any field without sufficient evidence.
+- NEVER invent or guess values.
+- Numeric fields must be numbers, not strings.
+- In observacoes, briefly note ambiguities or extraction limitations.
+"""
+
+GLP_MERGE_PROMPT = """\
+You are merging structured extractions from multiple files of the SAME GLP project.
+
+Different files may contribute title-block metadata, appliance counts, gas line details, \
+tank specifications, or sheet-specific component information.
+
+Your task: produce a SINGLE unified extraction for the GLP memorial context.
+
+Rules:
+- When multiple files provide the SAME field with DIFFERENT values, prefer the value from the \
+  most authoritative file for that field.
+- When only one file provides a field, use that value.
+- Return null only when NO file provided a value.
+- In observacoes, note any conflicts you resolved and which file you preferred.
+
+Per-file extractions:
+"""
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -485,6 +578,39 @@ def _build_gas_natural_text_only_input(source_file: ExtractedSourceFile) -> list
     ]}]
 
 
+def _build_glp_vision_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [
+        {"type": "input_text", "text": GLP_EXTRACTION_PROMPT},
+    ]
+
+    for page_image in source_file.page_images:
+        content.append({
+            "type": "input_image",
+            "image_url": page_image,
+            "detail": "original",
+        })
+
+    if source_file.extracted_text.strip():
+        content.append({
+            "type": "input_text",
+            "text": f"Supplementary OCR text from {source_file.original_filename}:\n"
+                    f"{source_file.extracted_text}",
+        })
+
+    return [{"role": "user", "content": content}]
+
+
+def _build_glp_text_only_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": GLP_EXTRACTION_PROMPT},
+        {
+            "type": "input_text",
+            "text": f"=== FILE: {source_file.original_filename} ===\n"
+                    f"{source_file.extracted_text}",
+        },
+    ]}]
+
+
 def _build_merge_input(
     per_file_results: list[tuple[str, dict[str, Any]]],
 ) -> list[dict[str, Any]]:
@@ -518,6 +644,18 @@ def _build_gas_natural_merge_input(
 
     return [{"role": "user", "content": [
         {"type": "input_text", "text": GAS_NATURAL_MERGE_PROMPT + "\n\n".join(sections)},
+    ]}]
+
+
+def _build_glp_merge_input(
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    sections = []
+    for filename, extraction in per_file_results:
+        sections.append(f"=== {filename} ===\n{json.dumps(extraction, ensure_ascii=False, indent=2)}")
+
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": GLP_MERGE_PROMPT + "\n\n".join(sections)},
     ]}]
 
 
@@ -648,6 +786,46 @@ def _merge_gas_natural_with_llm(
         model=model,
         input=_build_gas_natural_merge_input(per_file_results),
         text_format=GasNaturalLLMExtraction,
+    )
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _extract_glp_single_file(
+    client: Any,
+    model: str,
+    source_file: ExtractedSourceFile,
+) -> dict[str, Any]:
+    has_images = bool(source_file.page_images)
+    input_messages = (
+        _build_glp_vision_input(source_file) if has_images
+        else _build_glp_text_only_input(source_file)
+    )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": input_messages,
+        "text_format": GlpLLMExtraction,
+    }
+    if has_images:
+        kwargs["reasoning"] = {"effort": "high"}
+
+    response = client.responses.parse(**kwargs)
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _merge_glp_with_llm(
+    client: Any,
+    model: str,
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    response = client.responses.parse(
+        model=model,
+        input=_build_glp_merge_input(per_file_results),
+        text_format=GlpLLMExtraction,
     )
     if response.output_parsed is None:
         return {}
@@ -824,5 +1002,49 @@ def extract_gas_natural_with_llm(source_files: list[ExtractedSourceFile]) -> dic
         _count_non_null_fields(merged),
         elapsed,
     )
+
+    return merged
+
+
+def extract_glp_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
+    """Vision-first extraction for GLP memorial fields only."""
+    if not is_llm_extraction_enabled():
+        logger.debug("GLP LLM extraction disabled, skipping")
+        return {}
+
+    usable_files = [
+        sf for sf in source_files
+        if sf.extracted_text.strip() or sf.page_images
+    ]
+    if not usable_files:
+        logger.info("No extractable content in GLP source files, skipping LLM")
+        return {}
+
+    client = _get_client()
+    model = _get_model()
+    logger.info("GLP LLM vision extraction: model=%s, files=%d", model, len(usable_files))
+
+    t0 = time.monotonic()
+    per_file_results: list[tuple[str, dict[str, Any]]] = []
+
+    for sf in usable_files:
+        result = _extract_glp_single_file(client, model, sf)
+        if result:
+            per_file_results.append((sf.original_filename, result))
+            logger.info("  glp %s: %d fields extracted", sf.original_filename, _count_non_null_fields(result))
+
+    if not per_file_results:
+        logger.warning("GLP LLM extraction returned no results from any file")
+        return {}
+
+    if len(per_file_results) == 1:
+        merged = per_file_results[0][1]
+    else:
+        logger.info("Merging %d GLP per-file extractions with LLM", len(per_file_results))
+        merged = _merge_glp_with_llm(client, model, per_file_results)
+
+    merged.pop("observacoes", None)
+    elapsed = time.monotonic() - t0
+    logger.info("GLP LLM extraction complete: fields=%d, elapsed=%.1fs", _count_non_null_fields(merged), elapsed)
 
     return merged

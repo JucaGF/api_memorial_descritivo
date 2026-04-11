@@ -74,6 +74,32 @@ GAS_NATURAL_PENDING_EXTRACTION = (
     "teto_ou_piso",
 )
 
+GLP_EXTRACTABLE_BY_MAPPER = (
+    "obra.construtora",
+    "obra.nome",
+    "obra.localizacao",
+    "obra.numero_cadastro",
+    "obra.qtd_apartamentos",
+)
+
+GLP_PENDING_EXTRACTION = (
+    "obra.tipo_edificacao",
+    "obra.tipologia",
+    "obra.qtd_lojas",
+    "obra.qtd_restaurantes",
+    "abastecimento.qtd_tanques",
+    "abastecimento.pavimento",
+    "dimensionamento.qtd_fogao",
+    "dimensionamento.qtd_aquecedor",
+    "dimensionamento.qtd_churrasqueira",
+    "soma.qtd_pontos_de_utilizacao",
+    "ramal.primario_diametro",
+    "ramal.primario_material",
+    "ramal.primario_pavimento",
+    "numero.prancha",
+    "teto_ou_piso",
+)
+
 # Campos extraíveis identificados nos projetos reais, ainda não implementados.
 PENDING_EXTRACTION = (
     "obra.tipo_edificacao",
@@ -838,6 +864,53 @@ def map_extraction_to_partial_telecom_context(
 
 
 def map_extraction_to_partial_gas_natural_context(
+    extraction_result: ProjectExtractionResult,
+) -> MappingResult:
+    raw_text = extraction_result.raw_text
+    text = _normalize_text(raw_text)
+
+    context: dict[str, Any] = {}
+    evidence: dict[str, FieldExtraction] = {}
+
+    def add(path: str, extraction: FieldExtraction | None) -> None:
+        _add_field(context, evidence, path, extraction)
+
+    add("obra.construtora", _extract_construtora(raw_text))
+    add("obra.nome", _extract_nome_obra(raw_text))
+    add("obra.localizacao", _extract_localizacao(raw_text))
+    add("obra.numero_cadastro", _extract_numero_cadastro(raw_text))
+    add("obra.qtd_apartamentos", _extract_qtd_apartamentos(text))
+
+    return MappingResult(context=context, evidence=evidence)
+
+
+def assess_glp_extraction_coverage(mapping: MappingResult) -> ExtractionReport:
+    filled = []
+    missing = []
+    for field_path in GLP_EXTRACTABLE_BY_MAPPER:
+        value = _get_nested_value(mapping.context, field_path)
+        if value is not None:
+            filled.append(field_path)
+        else:
+            missing.append(field_path)
+
+    pending = []
+    for field_path in GLP_PENDING_EXTRACTION:
+        value = _get_nested_value(mapping.context, field_path)
+        if value is not None:
+            filled.append(field_path)
+        else:
+            pending.append(field_path)
+
+    return ExtractionReport(
+        filled=filled,
+        missing=missing,
+        pending=pending,
+        evidence=mapping.evidence,
+    )
+
+
+def map_extraction_to_partial_glp_context(
     extraction_result: ProjectExtractionResult,
 ) -> MappingResult:
     raw_text = extraction_result.raw_text
