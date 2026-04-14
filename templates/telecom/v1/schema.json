@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MemorialTelecomContextV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["documento", "obra"],
+  "properties": {
+    "documento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_atual"],
+      "properties": {
+        "data_atual": {
+          "type": "string",
+          "description": "Data exibida na capa do memorial"
+        }
+      }
+    },
+    "obra": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "numero_cadastro",
+        "construtora",
+        "nome",
+        "localizacao",
+        "tipo_edificacao",
+        "tipologia",
+        "qtd_apartamentos",
+        "qtd_lojas",
+        "qtd_restaurantes"
+      ],
+      "properties": {
+        "numero_cadastro": {
+          "type": "string",
+          "description": "Número de cadastro da obra exibido na capa"
+        },
+        "construtora": {
+          "type": "string",
+          "description": "Nome da construtora responsável pela obra"
+        },
+        "nome": {
+          "type": "string",
+          "description": "Nome da obra ou empreendimento"
+        },
+        "localizacao": {
+          "type": "string",
+          "description": "Localização da obra"
+        },
+        "tipo_edificacao": {
+          "type": "string",
+          "description": "Tipo de edificação"
+        },
+        "tipologia": {
+          "type": "string",
+          "description": "Tipologia do empreendimento"
+        },
+        "qtd_apartamentos": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de apartamentos"
+        },
+        "qtd_lojas": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de lojas"
+        },
+        "qtd_restaurantes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de restaurantes"
+        }
+      }
+    }
+  }
+}

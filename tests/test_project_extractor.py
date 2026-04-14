@@ -19,8 +19,9 @@ class ProjectExtractorTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             file_path = Path(temp_dir) / "projeto.docx"
             document = Document()
-            document.add_paragraph("Quadro geral de baixa tensão.")
-            document.add_paragraph("Gerador de emergência parcial.")
+            document.add_paragraph("Quadro geral de baixa tensão (QGBT) instalado no pavimento térreo.")
+            document.add_paragraph("Gerador de emergência parcial com potência de 100 kVA.")
+            document.add_paragraph("Sistema de aterramento TN-S com hastes cravadas no solo.")
             document.save(file_path)
 
             files = [
@@ -38,7 +39,7 @@ class ProjectExtractorTests(unittest.TestCase):
 
             result = extract_project_files(files)
 
-            self.assertIn("Quadro geral de baixa tensão.", result.raw_text)
+            self.assertIn("Quadro geral de baixa tensão", result.raw_text)
             self.assertEqual(result.signals["total_files"], 1)
             self.assertTrue(result.signals["has_docx"])
             self.assertFalse(result.signals["has_pdf"])
@@ -54,7 +55,9 @@ class ProjectExtractorTests(unittest.TestCase):
             file_path = Path(temp_dir) / "projeto.pdf"
             document = fitz.open()
             page = document.new_page()
-            page.insert_text((72, 72), "Entrada de energia em media tensao")
+            page.insert_text((72, 72), "Entrada de energia em media tensao 15kV via ramal subterraneo.")
+            page.insert_text((72, 100), "Subestacao abrigada abaixadora com medicao em MT instalada no terreo.")
+            page.insert_text((72, 128), "Sistema de aterramento TN-S com hastes cravadas.")
             document.save(file_path)
             document.close()
 
@@ -73,6 +76,9 @@ class ProjectExtractorTests(unittest.TestCase):
 
             self.assertIn("Entrada de energia", result.raw_text)
             self.assertTrue(result.signals["has_pdf"])
+            self.assertEqual(len(result.source_files), 1)
+            self.assertEqual(len(result.source_files[0].page_images), 1)
+            self.assertTrue(result.source_files[0].page_images[0].startswith("data:image/png;base64,"))
 
     def test_extract_project_files_raises_for_corrupted_docx(self) -> None:
         with TemporaryDirectory() as temp_dir:

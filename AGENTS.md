@@ -1,201 +1,236 @@
 # AGENTS.md
 
-Este arquivo define como agentes de código devem trabalhar neste repositório.
+Instructions for coding agents working in this repository.
 
-Leia este arquivo antes de modificar qualquer código.
+Read this file before making changes.
 
----
+## 1) Mission and project state
 
-# Objetivo do projeto
+This repository is a production-oriented backend for automatic generation of engineering memorial documents from technical project files.
 
-Este projeto implementa um sistema para geração automática de memoriais descritivos de engenharia a partir de projetos técnicos.
+Current operational focus:
 
-O sistema recebe arquivos de projeto (PDF ou DOCX), extrai informações relevantes e gera um memorial descritivo DOCX utilizando templates.
+- memorial eletrico v1 (end-to-end generation and review-session flow)
 
-O sistema está sendo desenvolvido começando pelo **memorial elétrico v1**.
+Secondary track in progress:
 
----
+- memorial telecom v1 (schema/notes currently present; full generation flow still evolving)
 
-# Princípios de arquitetura
+Treat the codebase as an actively evolving system, not as a greenfield prototype.
 
-O sistema deve ser construído seguindo estes princípios:
+## 2) Instruction hierarchy (follow in this order)
 
-1. Separação clara de responsabilidades
-2. Pipeline determinístico para geração de memoriais
-3. Validação forte de dados antes da renderização
-4. Template DOCX como fonte de verdade do documento
-5. Código modular e testável
+When instructions conflict, use this precedence:
 
-Evite criar arquiteturas genéricas ou abstrações complexas antes de serem necessárias.
+1. Direct user request for the current task
+2. System/developer runtime instructions
+3. This AGENTS.md
+4. Local implementation patterns in the touched modules
 
----
+If a user request conflicts with a hard safety/contract rule below, keep the contract and explain the limitation.
 
-# Pipeline esperado do sistema
+## 3) Non-negotiable system rules
 
-A primeira versão funcional do sistema deve implementar o pipeline completo:
+Always preserve these constraints:
 
-1. Upload de arquivos de projeto
-2. Armazenamento temporário dos arquivos
-3. Extração de dados relevantes dos documentos
-4. Construção do contexto estruturado do memorial
-5. Validação do contexto contra o schema do template
-6. Renderização do template DOCX
-7. Retorno do memorial final
+1. The DOCX template is the source of truth for final document structure.
+2. The JSON schema is the data contract for rendering.
+3. Final memorial generation must remain deterministic.
+4. Do not use LLM output as final memorial content generation.
+5. Validate data before rendering.
+6. Prefer small and localized changes over broad refactors.
+7. Preserve existing API behavior unless the task explicitly requires behavior change.
+8. Rendered DOCX must not contain unresolved Jinja placeholders.
 
-O foco inicial é **memorial elétrico v1**.
+## 4) Repository map
 
-Não implemente suporte a múltiplos tipos de memorial nesta etapa.
+Primary areas:
 
----
+- app/api/: route handlers and HTTP orchestration
+- app/schemas/: API/internal contracts
+- app/services/: ingestion, extraction, mapping, pipelines, sessions, validation, rendering
+- templates/eletrico/v1/: template + schema + notes
+- templates/telecom/v1/: schema + notes (contract track)
+- tests/: unit/integration coverage
+- migrations/: persistence changes
 
-# Estrutura esperada do código
+## 5) Core flows to protect
 
-O projeto deve evoluir para uma estrutura semelhante a:
+### 5.1 JSON generation flow
 
+Use when context is already structured.
+Expected behavior:
+
+- validate context
+- render DOCX
+- return final document
+
+### 5.2 File ingestion flow
+
+Use when uploaded files must be prepared for extraction/generation.
+
+### 5.3 Generation-from-files flow
+
+Expected behavior:
+
+- ingest files
+- extract information
+- map extraction into memorial context
+- validate context
+- render DOCX
+
+### 5.4 Review-session flow
+
+Expected behavior:
+
+- create session
+- execute extraction in background
+- persist partial context and extraction report
+- allow manual corrections
+- merge corrections into context
+- generate final document from reviewed context
+
+When changing review sessions, preserve consistency across:
+
+- route behavior
+- background task ownership
+- session store behavior
+- filesystem and Supabase backends
+
+## 6) Vibe coding operating mode (how to execute work)
+
+Use fast, safe iteration loops:
+
+1. Understand current behavior in code before editing.
+2. Make the smallest useful change.
+3. Run the narrowest relevant tests immediately.
+4. Inspect failures and fix with focused edits.
+5. Expand validation only after targeted tests pass.
+
+Execution principles:
+
+- Favor clarity over clever abstractions.
+- Favor concrete evidence (tests/output) over assumptions.
+- Keep changes reversible and easy to review.
+- Do not mix unrelated refactors with requested behavior changes.
+
+## 7) Required workflow before editing
+
+Before changing code:
+
+1. Read README.md.
+2. Read this AGENTS.md.
+3. Read docs/PLANS.md.
+4. Inspect files directly related to the task.
+5. Identify existing behavior and relevant tests.
+
+For medium/high-risk tasks:
+
+- write a short plan before implementation
+- define what must not break
+- validate each milestone with tests
+
+## 8) Change scope guidelines
+
+For simple tasks:
+
+- implement minimal correct change
+- update/add relevant tests only
+- run targeted test module(s)
+
+For medium/risky tasks:
+
+- inspect behavior first
+- plan briefly
+- implement incrementally
+- run targeted tests + nearby regression tests
+
+For large tasks/refactors:
+
+- use a plan file in docs/plans/
+- split into milestones
+- keep compatibility constraints explicit
+
+## 9) Testing policy (mandatory)
+
+Do not consider a task complete without running relevant tests.
+use uv venv
+
+Common commands:
+
+```bash
+python -m unittest discover -s tests
+python -m unittest tests.test_api
+python -m unittest tests.test_session_store
+python -m unittest tests.test_supabase_session_store
 ```
 
-app/
-api/
-core/
-schemas/
-services/
-file_ingestion.py
-project_extractor.py
-context_builder.py
-memorial_validator.py
-memorial_renderer.py
-main.py
+Minimum required by change type:
 
-```
+- API behavior changes: run tests.test_api
+- session persistence changes: run tests.test_session_store and tests.test_supabase_session_store
+- extraction/mapping changes: run mapper/pipeline-related tests
+- render/template/validation changes: run memorial renderer/validator tests
+- cross-flow changes: run full suite (discover -s tests)
 
-Cada serviço deve ter responsabilidade única.
+## 10) Template and schema evolution rules
 
----
+If touching template/schema-related logic:
 
-# Template e schema
+- keep template and schema coherent
+- do not change template behavior without schema impact check
+- do not change schema without template and test impact check
+- keep rendering deterministic and contract-driven
 
-O template do memorial elétrico está localizado em:
+## 11) Extraction and mapping rules
 
-```
+Extraction can use parsing/OCR/heuristics/vision/LLM assistance, but:
 
-templates/eletrico/v1/template.docx
+- output used for final rendering must conform to schema contract
+- do not present low-confidence inference as high-confidence fact
+- preserve pipeline compatibility when evolving mapping
+- update tests for changed mapping/extraction rules
 
-```
+## 12) Session and persistence rules
 
-O schema de validação está em:
+Review-session behavior is critical.
+When changing session code:
 
-```
+- preserve API contract whenever possible
+- keep filesystem and Supabase behavior aligned
+- handle expiration and cleanup explicitly
+- avoid ambiguous or dead status transitions
 
-templates/eletrico/v1/schema.json
+## 13) Avoid
 
-```
+Do not:
 
-O schema define o contrato de dados necessário para renderizar o template.
+- remove schema validation
+- use LLMs to generate final memorial document content
+- change template and schema incoherently
+- introduce unnecessary abstractions
+- modify unrelated parts of codebase
+- assume behavior without reading code
+- modify files outside repository scope
 
-Sempre valide os dados contra o schema antes de renderizar.
+## 14) Definition of done
 
----
+A task is done only when:
 
-# Renderização do template
+1. requested behavior is correctly implemented
+2. architecture/contracts are preserved
+3. relevant tests pass
+4. scope remained controlled
+5. code is readable and maintainable
+6. changes and validation were clearly summarized
 
-A renderização utiliza **docxtpl**.
+## 15) Engineering priorities for trade-off decisions
 
-Regras importantes:
+When multiple valid paths exist, prefer what improves:
 
-- O documento final não pode conter placeholders Jinja.
-- Não deixar tags `{% %}` ou `{{ }}` no documento final.
-- O template deve ser renderizado apenas com dados validados.
-
-A renderização do template deve ser **determinística**.
-
-Não utilize LLM para gerar partes do documento final.
-
----
-
-# Extração de dados
-
-A extração de dados dos projetos pode utilizar:
-
-- parsing de PDF
-- parsing de DOCX
-- LLM
-- visão computacional
-
-Mas a saída dessa etapa deve sempre ser convertida em um **contexto estruturado compatível com o schema**.
-
----
-
-# Testes
-
-Testes existentes:
-
-```
-
-scripts/test_render_eletrico.py
-
-```
-
-Esse script valida:
-
-- renderização do template
-- ausência de placeholders
-- cenários com e sem subestação
-
-Novos serviços devem ser testáveis isoladamente.
-
----
-
-# Regras para modificar código
-
-Antes de modificar código:
-
-1. Leia o README.md
-2. Leia este AGENTS.md
-3. Inspecione a estrutura do projeto
-
-Evite:
-
-- modificar muitos arquivos em uma única mudança
-- criar abstrações desnecessárias
-- modificar templates sem atualizar o schema
-- remover validações existentes
-
----
-
-# Definition of Done
-
-Uma tarefa só está completa quando:
-
-- o código implementa a funcionalidade solicitada
-- o código é consistente com a arquitetura do projeto
-- os testes relevantes passam
-- nenhuma regra deste AGENTS.md foi violada
-- o código é legível e modular
-
----
-
-# Restrições importantes
-
-Não:
-
-- remover validação de schema
-- usar LLM para gerar o memorial final
-- alterar o template sem justificativa
-- criar dependência externa desnecessária
-- modificar arquivos fora do repositório
-
----
-
-# Primeira meta de desenvolvimento
-
-Implementar a primeira versão funcional do pipeline completo para o memorial elétrico v1.
-
-Essa versão deve incluir:
-
-- endpoint de API
-- upload de arquivos
-- extração inicial de dados
-- construção do contexto do template
-- validação contra schema
-- geração do DOCX final
-```
+1. robustness of existing operational flows
+2. clarity of review-session contracts
+3. consistency between filesystem and Supabase backends
+4. test strength and confidence
+5. duplication reduction in file-based pipelines
+6. incremental quality gains in extraction/mapping

@@ -7,3 +7,6 @@ pytest
 httpx
 python-multipart
 pymupdf
+supabase
+python-dotenv
+openai
