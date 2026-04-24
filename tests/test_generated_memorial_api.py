@@ -118,6 +118,24 @@ class GeneratedMemorialApiTests(unittest.TestCase):
 
         self.assertEqual(response.download_url, "https://signed.example/download")
 
+    @patch("app.api.routes.delete_generated_memorial")
+    def test_delete_memorial_returns_204_when_deleted(self, delete_mock) -> None:
+        delete_mock.return_value = True
+
+        response = routes.delete_persisted_memorial("abc-123")
+
+        self.assertEqual(response.status_code, 204)
+        delete_mock.assert_called_once_with("abc-123")
+
+    @patch("app.api.routes.delete_generated_memorial")
+    def test_delete_memorial_returns_404_when_missing(self, delete_mock) -> None:
+        delete_mock.return_value = False
+
+        response = routes.delete_persisted_memorial("missing")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.body.decode("utf-8"), '{"detail":"Memorial não encontrado."}')
+
 
 if __name__ == "__main__":
     unittest.main()

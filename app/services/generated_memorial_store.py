@@ -54,7 +54,12 @@ def create_signed_download_url(record: dict[str, Any]) -> str:
     return _signed_url_from_response(response)
 
 
-def _response_from_record(record: dict[str, Any]) -> GeneratedMemorialResponse:
+def _response_from_record(
+    record: dict[str, Any],
+    *,
+    include_download_url: bool = True,
+) -> GeneratedMemorialResponse:
+    download_url = create_signed_download_url(record) if include_download_url else ""
     return GeneratedMemorialResponse.model_validate(
         {
             "id": str(record["id"]),
@@ -65,7 +70,7 @@ def _response_from_record(record: dict[str, Any]) -> GeneratedMemorialResponse:
             "pdf_filenames": record.get("pdf_filenames") or [],
             "created_at": record["created_at"],
             "updated_at": record["updated_at"],
-            "download_url": create_signed_download_url(record),
+            "download_url": download_url,
         }
     )
 
@@ -116,7 +121,10 @@ def list_generated_memorials(memorial_type: str | None = None) -> list[Generated
         response = query.eq("type", memorial_type).execute()
     else:
         response = query.execute()
-    return [_response_from_record(record) for record in (response.data or [])]
+    return [
+        _response_from_record(record, include_download_url=False)
+        for record in (response.data or [])
+    ]
 
 
 def get_generated_memorial_record(memorial_id: str) -> dict[str, Any] | None:
@@ -137,3 +145,13 @@ def get_generated_memorial(memorial_id: str) -> GeneratedMemorialResponse | None
     if record is None:
         return None
     return _response_from_record(record)
+
+
+def delete_generated_memorial(memorial_id: str) -> bool:
+    record = get_generated_memorial_record(memorial_id)
+    if record is None:
+        return False
+
+    _client().storage.from_(record["storage_bucket"]).remove([record["storage_path"]])
+    _client().table(GENERATED_MEMORIALS_TABLE).delete().eq("id", memorial_id).execute()
+    return True

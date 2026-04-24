@@ -6,7 +6,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.schemas.file_ingestion import FileIngestionResponse
 from app.schemas.generated_memorial import (
@@ -30,6 +30,7 @@ from app.services.memorial_renderer import MemorialRenderError
 from app.services.memorial_validator import MemorialValidationError
 from app.services.generated_memorial_store import (
     create_generated_memorial,
+    delete_generated_memorial,
     create_signed_download_url,
     get_generated_memorial,
     get_generated_memorial_record,
@@ -198,6 +199,16 @@ def get_persisted_memorial_download(memorial_id: str):
     if record is None:
         return JSONResponse(status_code=404, content={"detail": "Memorial não encontrado."})
     return GeneratedMemorialDownloadResponse(download_url=create_signed_download_url(record))
+
+
+@router.delete(
+    "/api/v1/memoriais/{memorial_id}",
+    status_code=204,
+)
+def delete_persisted_memorial(memorial_id: str):
+    if not delete_generated_memorial(memorial_id):
+        return JSONResponse(status_code=404, content={"detail": "Memorial não encontrado."})
+    return Response(status_code=204)
 
 
 @router.post(

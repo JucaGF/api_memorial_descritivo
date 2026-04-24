@@ -373,6 +373,34 @@ class ExtractWithLLMTests(unittest.TestCase):
 
     @patch("app.services.llm_extractor._get_client")
     @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_multiple_rich_text_files_use_single_combined_extraction(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        mock_parsed = LLMExtraction(obra=ObraExtraction(construtora="Combined"))
+        mock_response = MagicMock()
+        mock_response.output_parsed = mock_parsed
+        mock_client = MagicMock()
+        mock_client.responses.parse.return_value = mock_response
+        client_mock.return_value = mock_client
+
+        files = [
+            _source_file("a.pdf", "EL " * 2000, ["data:image/png;base64,AAA"]),
+            _source_file("b.pdf", "EL " * 2000, ["data:image/png;base64,BBB"]),
+        ]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_with_llm(files)
+
+        kwargs = mock_client.responses.parse.call_args.kwargs
+        content = kwargs["input"][0]["content"]
+        self.assertEqual(mock_client.responses.parse.call_count, 1)
+        self.assertFalse(any(part.get("type") == "input_image" for part in content))
+        self.assertNotIn("reasoning", kwargs)
+        self.assertEqual(result["obra"]["construtora"], "Combined")
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
     def test_handles_null_parse_response(self, _model_mock, client_mock) -> None:
         mock_response = MagicMock()
         mock_response.output_parsed = None
@@ -443,6 +471,34 @@ class ExtractWithLLMTests(unittest.TestCase):
         self.assertEqual(result["obra"]["construtora"], "Alpha")
         self.assertEqual(result["obra"]["qtd_lojas"], 3)
 
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_telecom_multiple_rich_text_files_use_single_combined_extraction(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        mock_parsed = TelecomLLMExtraction(obra=ObraExtraction(construtora="Telecom Combined"))
+        mock_response = MagicMock()
+        mock_response.output_parsed = mock_parsed
+        mock_client = MagicMock()
+        mock_client.responses.parse.return_value = mock_response
+        client_mock.return_value = mock_client
+
+        files = [
+            _source_file("a.pdf", "TELECOM " * 1000, ["data:image/png;base64,AAA"]),
+            _source_file("b.pdf", "TELECOM " * 1000, ["data:image/png;base64,BBB"]),
+        ]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_telecom_with_llm(files)
+
+        kwargs = mock_client.responses.parse.call_args.kwargs
+        content = kwargs["input"][0]["content"]
+        self.assertEqual(mock_client.responses.parse.call_count, 1)
+        self.assertFalse(any(part.get("type") == "input_image" for part in content))
+        self.assertNotIn("reasoning", kwargs)
+        self.assertEqual(result["obra"]["construtora"], "Telecom Combined")
+
     def test_extract_gas_natural_returns_empty_when_disabled(self) -> None:
         with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
             result = extract_gas_natural_with_llm([_source_file()])
@@ -499,6 +555,34 @@ class ExtractWithLLMTests(unittest.TestCase):
         self.assertEqual(mock_client.responses.parse.call_count, 3)
         self.assertEqual(result["obra"]["construtora"], "Alpha")
         self.assertEqual(result["valvula"]["esfera_diametro"], "32 mm")
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_gas_natural_multiple_rich_text_files_use_single_combined_extraction(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        mock_parsed = GasNaturalLLMExtraction(obra=ObraExtraction(construtora="Gas Combined"))
+        mock_response = MagicMock()
+        mock_response.output_parsed = mock_parsed
+        mock_client = MagicMock()
+        mock_client.responses.parse.return_value = mock_response
+        client_mock.return_value = mock_client
+
+        files = [
+            _source_file("a.pdf", "GAS " * 2000, ["data:image/png;base64,AAA"]),
+            _source_file("b.pdf", "GAS " * 2000, ["data:image/png;base64,BBB"]),
+        ]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_gas_natural_with_llm(files)
+
+        kwargs = mock_client.responses.parse.call_args.kwargs
+        content = kwargs["input"][0]["content"]
+        self.assertEqual(mock_client.responses.parse.call_count, 1)
+        self.assertFalse(any(part.get("type") == "input_image" for part in content))
+        self.assertNotIn("reasoning", kwargs)
+        self.assertEqual(result["obra"]["construtora"], "Gas Combined")
 
     def test_extract_glp_returns_empty_when_disabled(self) -> None:
         with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
