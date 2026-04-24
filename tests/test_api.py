@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -662,10 +663,15 @@ class ReviewSessionApiTests(unittest.TestCase):
                 expires_at=(datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat(),
             )
             session_file = Path(temp_dir) / f"{session_id}.json"
-            with patch("app.services.session_store._sessions_dir", return_value=Path(temp_dir)):
-                session_store.save_session(expired_session)
+            with patch.dict("os.environ", {"SUPABASE_URL": "", "SUPABASE_KEY": ""}):
+                filesystem_store = importlib.reload(session_store)
+                with patch("app.services.session_store._sessions_dir", return_value=Path(temp_dir)):
+                    filesystem_store.save_session(expired_session)
 
-                response = self.client.get(f"/api/v1/memoriais/eletrico/sessoes/{session_id}")
+                    with patch("app.api.routes.load_session", filesystem_store.load_session):
+                        response = self.client.get(
+                            f"/api/v1/memoriais/eletrico/sessoes/{session_id}"
+                        )
 
             self.assertEqual(response.status_code, 404)
             self.assertFalse(session_file.exists())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,17 +13,26 @@ class SessionStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temp_dir = TemporaryDirectory()
         self._sessions_path = Path(self._temp_dir.name)
+        self._env_patcher = patch.dict(
+            "os.environ",
+            {
+                "SUPABASE_URL": "",
+                "SUPABASE_KEY": "",
+            },
+        )
+        self._env_patcher.start()
+        from app.services import session_store
+
+        self._store = importlib.reload(session_store)
         self._patcher = patch(
             "app.services.session_store._sessions_dir",
             return_value=self._sessions_path,
         )
         self._patcher.start()
-        # Re-import after patching so the module uses the patched dir
-        from app.services import session_store
-        self._store = session_store
 
     def tearDown(self) -> None:
         self._patcher.stop()
+        self._env_patcher.stop()
         self._temp_dir.cleanup()
 
     def test_create_session_returns_uuid_string(self) -> None:
