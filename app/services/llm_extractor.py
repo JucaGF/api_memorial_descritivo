@@ -11,7 +11,8 @@ from pydantic import BaseModel
 from app.services.project_extractor import ExtractedSourceFile
 
 logger = logging.getLogger(__name__)
-GLP_TEXT_ONLY_THRESHOLD = 4000
+RICH_TEXT_ONLY_THRESHOLD = 4000
+GLP_TEXT_ONLY_THRESHOLD = RICH_TEXT_ONLY_THRESHOLD
 
 
 # ── Extraction schema ─────────────────────────────────────────────────────────
@@ -616,13 +617,20 @@ def _build_glp_text_only_input(source_file: ExtractedSourceFile) -> list[dict[st
 def _build_glp_combined_text_input(
     source_files: list[ExtractedSourceFile],
 ) -> list[dict[str, Any]]:
+    return _build_combined_text_input(source_files, GLP_EXTRACTION_PROMPT)
+
+
+def _build_combined_text_input(
+    source_files: list[ExtractedSourceFile],
+    prompt: str,
+) -> list[dict[str, Any]]:
     sections = [
         f"=== FILE: {source_file.original_filename} ===\n{source_file.extracted_text}"
         for source_file in source_files
         if source_file.extracted_text.strip()
     ]
     return [{"role": "user", "content": [
-        {"type": "input_text", "text": GLP_EXTRACTION_PROMPT},
+        {"type": "input_text", "text": prompt},
         {"type": "input_text", "text": "\n\n".join(sections)},
     ]}]
 
@@ -757,6 +765,36 @@ def _extract_gas_natural_single_file(
         kwargs["reasoning"] = {"effort": "high"}
 
     response = client.responses.parse(**kwargs)
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _has_rich_text(source_file: ExtractedSourceFile) -> bool:
+    return (
+        bool(source_file.extracted_text.strip())
+        and len(source_file.extracted_text) >= RICH_TEXT_ONLY_THRESHOLD
+    )
+
+
+def _should_use_combined_text_extraction(
+    source_files: list[ExtractedSourceFile],
+) -> bool:
+    return len(source_files) > 1 and all(_has_rich_text(sf) for sf in source_files)
+
+
+def _extract_combined_text(
+    client: Any,
+    model: str,
+    source_files: list[ExtractedSourceFile],
+    prompt: str,
+    text_format: type[BaseModel],
+) -> dict[str, Any]:
+    response = client.responses.parse(
+        model=model,
+        input=_build_combined_text_input(source_files, prompt),
+        text_format=text_format,
+    )
     if response.output_parsed is None:
         return {}
     return response.output_parsed.model_dump(mode="json")
@@ -904,6 +942,24 @@ def extract_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
     )
 
     t0 = time.monotonic()
+    if _should_use_combined_text_extraction(usable_files):
+        logger.info("Using single combined text extraction for %d files", len(usable_files))
+        merged = _extract_combined_text(
+            client,
+            model,
+            usable_files,
+            EXTRACTION_PROMPT,
+            LLMExtraction,
+        )
+        merged.pop("observacoes", None)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Combined text extraction complete: fields=%d, elapsed=%.1fs",
+            _count_non_null_fields(merged),
+            elapsed,
+        )
+        return merged
+
     per_file_results: list[tuple[str, dict[str, Any]]] = []
 
     for sf in usable_files:
@@ -951,6 +1007,24 @@ def extract_telecom_with_llm(source_files: list[ExtractedSourceFile]) -> dict[st
     )
 
     t0 = time.monotonic()
+    if _should_use_combined_text_extraction(usable_files):
+        logger.info("Using single combined telecom text extraction for %d files", len(usable_files))
+        merged = _extract_combined_text(
+            client,
+            model,
+            usable_files,
+            TELECOM_EXTRACTION_PROMPT,
+            TelecomLLMExtraction,
+        )
+        merged.pop("observacoes", None)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Telecom combined text extraction complete: fields=%d, elapsed=%.1fs",
+            _count_non_null_fields(merged),
+            elapsed,
+        )
+        return merged
+
     per_file_results: list[tuple[str, dict[str, Any]]] = []
 
     for sf in usable_files:
@@ -1006,6 +1080,24 @@ def extract_gas_natural_with_llm(source_files: list[ExtractedSourceFile]) -> dic
     )
 
     t0 = time.monotonic()
+    if _should_use_combined_text_extraction(usable_files):
+        logger.info("Using single combined gas natural text extraction for %d files", len(usable_files))
+        merged = _extract_combined_text(
+            client,
+            model,
+            usable_files,
+            GAS_NATURAL_EXTRACTION_PROMPT,
+            GasNaturalLLMExtraction,
+        )
+        merged.pop("observacoes", None)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Gas natural combined text extraction complete: fields=%d, elapsed=%.1fs",
+            _count_non_null_fields(merged),
+            elapsed,
+        )
+        return merged
+
     per_file_results: list[tuple[str, dict[str, Any]]] = []
 
     for sf in usable_files:

@@ -78,17 +78,29 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
         self._table().select.return_value.order.return_value.eq.return_value.execute.return_value = (
             _mock_response([_record(memorial_type="telecom")])
         )
-        self._mock_client.storage.from_.return_value.create_signed_url.return_value = {
-            "signedURL": "https://signed.example/download"
-        }
 
         result = store.list_generated_memorials(memorial_type="telecom")
 
         self._table().select.assert_called_with("*")
         self._table().select.return_value.order.assert_called_with("created_at", desc=True)
         self._table().select.return_value.order.return_value.eq.assert_called_with("type", "telecom")
+        self._mock_client.storage.from_.return_value.create_signed_url.assert_not_called()
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].type, "telecom")
+        self.assertEqual(result[0].download_url, "")
+
+    def test_list_generated_memorials_survives_signed_url_transport_failure(self) -> None:
+        self._table().select.return_value.order.return_value.execute.return_value = (
+            _mock_response([_record(memorial_type="telecom")])
+        )
+        self._mock_client.storage.from_.return_value.create_signed_url.side_effect = (
+            RuntimeError("Server disconnected")
+        )
+
+        result = store.list_generated_memorials()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].download_url, "")
 
     def test_get_generated_memorial_returns_none_when_missing(self) -> None:
         self._table().select.return_value.eq.return_value.execute.return_value = _mock_response([])
@@ -110,6 +122,30 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
             3600,
         )
         self.assertEqual(url, "https://signed.example/download")
+
+    def test_delete_generated_memorial_removes_storage_object_and_record(self) -> None:
+        self._table().select.return_value.eq.return_value.execute.return_value = (
+            _mock_response([_record()])
+        )
+        self._mock_client.storage.from_.return_value.remove.return_value = _mock_response([])
+        self._table().delete.return_value.eq.return_value.execute.return_value = _mock_response([])
+
+        deleted = store.delete_generated_memorial("abc-123")
+
+        self.assertTrue(deleted)
+        self._mock_client.storage.from_.assert_called_with("generated-memorials")
+        self._mock_client.storage.from_.return_value.remove.assert_called_once_with(
+            ["telecom/abc-123/memorial.docx"]
+        )
+        self._table().delete.return_value.eq.assert_called_once_with("id", "abc-123")
+
+    def test_delete_generated_memorial_returns_false_when_missing(self) -> None:
+        self._table().select.return_value.eq.return_value.execute.return_value = _mock_response([])
+
+        deleted = store.delete_generated_memorial("missing")
+
+        self.assertFalse(deleted)
+        self._mock_client.storage.from_.return_value.remove.assert_not_called()
 
 
 if __name__ == "__main__":
