@@ -28,4 +28,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import logging
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logging.warning(f"[DEBUG-VALIDATION] {exc.errors()}")
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    logging.warning(f"[DEBUG-EXCEPTION] {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
 app.include_router(api_router)

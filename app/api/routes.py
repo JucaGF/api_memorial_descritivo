@@ -210,6 +210,12 @@ async def create_persisted_memorial_from_files(
     files: list[UploadFile] | None = File(default=None),
     observations: str | None = Form(default=None),
 ):
+    import logging
+    logging.warning(f"[DEBUG] memorial_type={memorial_type}, files={files}, observations={observations}")
+    if files:
+        for f in files:
+            logging.warning(f"[DEBUG] file: filename={f.filename}, content_type={f.content_type}, size={f.size}")
+
     if memorial_type not in _SUPPORTED_MEMORIAL_TYPES:
         return _unsupported_memorial_type_response(memorial_type)
 
@@ -229,8 +235,12 @@ async def create_persisted_memorial_from_files(
             observations=observations,
         )
     except MemorialValidationError as error:
+        import traceback
+        logging.warning(f"[DEBUG-ERR] MemorialValidationError: {error}\n{traceback.format_exc()}")
         return _validation_error_response(error, _validation_detail_for_type(memorial_type))
     except (FileIngestionError, ProjectExtractionError) as error:
+        import traceback
+        logging.warning(f"[DEBUG-ERR] {type(error).__name__}: {error}\n{traceback.format_exc()}")
         return JSONResponse(status_code=400, content={"detail": str(error)})
     except MemorialRenderError as error:
         return JSONResponse(
