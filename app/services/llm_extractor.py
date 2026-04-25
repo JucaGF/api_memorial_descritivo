@@ -468,7 +468,7 @@ def is_llm_extraction_enabled() -> bool:
 
 
 def _get_model() -> str:
-    return os.getenv("OPENAI_MODEL", "gpt-4.1")
+    return os.getenv("OPENAI_MODEL", "gpt-5.4")
 
 
 def _get_client() -> Any:
