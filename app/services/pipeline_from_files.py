@@ -318,14 +318,7 @@ def _extract_llm_primary(
     """LLM vision is the primary extractor; mapper supplements remaining gaps."""
     extraction_result = extract_project_files(files)
 
-    try:
-        llm_context = extract_with_llm(extraction_result.source_files)
-    except Exception:
-        logger.exception("LLM extraction failed; falling back to mapper-only extraction")
-        mapper_mapping = map_extraction_to_partial_context(extraction_result)
-        report = assess_extraction_coverage(mapper_mapping)
-        return mapper_mapping, report
-
+    llm_context = extract_with_llm(extraction_result.source_files)
     llm_fields = sum(
         1 for section in llm_context.values()
         if isinstance(section, dict)

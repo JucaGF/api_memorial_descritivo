@@ -157,36 +157,26 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Corp")
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
 
-    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
     @patch("app.services.pipeline_from_files.extract_with_llm")
     @patch("app.services.pipeline_from_files.extract_project_files")
-    def test_mapper_fallback_when_eletrico_llm_fails(
+    def test_eletrico_llm_failure_stops_generation(
         self,
         extract_files_mock,
         extract_llm_mock,
         map_mock,
-        assess_mock,
     ) -> None:
         ingested_files = [build_ingested_file()]
         extraction_result = build_extraction_result()
-        mapper_mapping = build_mapping_result(
-            {"obra": {"construtora": "Mapper Corp", "nome": "Edifício Mapper"}}
-        )
-        report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
         extract_llm_mock.side_effect = RuntimeError("OpenAI request failed")
-        map_mock.return_value = mapper_mapping
-        assess_mock.return_value = report
 
         with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
-            result_mapping, result_report = extract_mapping_from_ingested_files(ingested_files)
+            with self.assertRaisesRegex(RuntimeError, "OpenAI request failed"):
+                extract_mapping_from_ingested_files(ingested_files)
 
-        self.assertEqual(result_mapping.context, mapper_mapping.context)
-        self.assertEqual(result_report, report)
-        map_mock.assert_called_once_with(extraction_result)
-        assess_mock.assert_called_once_with(mapper_mapping)
+        map_mock.assert_not_called()
 
     @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_telecom_context")
