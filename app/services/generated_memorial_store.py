@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,8 +10,12 @@ from app.config import get_settings
 from app.schemas.generated_memorial import GeneratedMemorialResponse
 
 _client_instance: Any = None
+logger = logging.getLogger(__name__)
 
 GENERATED_MEMORIALS_TABLE = "generated_memorials"
+STATUS_PROCESSING = "processing"
+STATUS_READY = "ready"
+STATUS_FAILED = "failed"
 
 _FILENAME_BY_TYPE = {
     "eletrico": "memorial_eletrico_v1.docx",
@@ -82,6 +87,32 @@ def _is_missing_artifact_error(error: Exception) -> bool:
     return any(fragment in message for fragment in ("not found", "no such", "does not exist", "missing"))
 
 
+def _update_generated_memorial_status(
+    memorial_id: str,
+    *,
+    status: str,
+    updated_at: str,
+) -> None:
+    (
+        _client()
+        .table(GENERATED_MEMORIALS_TABLE)
+        .update({"status": status, "updated_at": updated_at})
+        .eq("id", memorial_id)
+        .execute()
+    )
+
+
+def _remove_artifact_if_present(storage_bucket: str, storage_path: str) -> None:
+    try:
+        _client().storage.from_(storage_bucket).remove([storage_path])
+    except Exception as error:
+        logger.warning(
+            "Generated memorial cleanup failed memorial_path=%s error_type=%s",
+            storage_path,
+            type(error).__name__,
+        )
+
+
 def create_signed_download_url(record: dict[str, Any]) -> str:
     storage_path = _safe_record_storage_path(record)
     try:
@@ -113,7 +144,11 @@ def _response_from_record(
     *,
     include_download_url: bool = True,
 ) -> GeneratedMemorialResponse:
-    download_url = create_signed_download_url(record) if include_download_url else ""
+    download_url = (
+        create_signed_download_url(record)
+        if include_download_url and record.get("status") == STATUS_READY
+        else ""
+    )
     return GeneratedMemorialResponse.model_validate(
         {
             "id": str(record["id"]),
@@ -142,22 +177,11 @@ def create_generated_memorial(
     storage_path = _expected_storage_path(memorial_type, memorial_id)
     now = datetime.now(tz=timezone.utc).isoformat()
 
-    _client().storage.from_(storage_settings.bucket).upload(
-        storage_path,
-        output_path.read_bytes(),
-        {
-            "content-type": (
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            ),
-            "upsert": "false",
-        },
-    )
-
     record = {
         "id": memorial_id,
         "type": memorial_type,
         "project_name": project_name,
-        "status": "ready",
+        "status": STATUS_PROCESSING,
         "observations": observations,
         "pdf_filenames": pdf_filenames,
         "storage_bucket": storage_settings.bucket,
@@ -166,7 +190,42 @@ def create_generated_memorial(
         "updated_at": now,
     }
     _client().table(GENERATED_MEMORIALS_TABLE).insert(record).execute()
-    return _response_from_record(record)
+
+    try:
+        _client().storage.from_(storage_settings.bucket).upload(
+            storage_path,
+            output_path.read_bytes(),
+            {
+                "content-type": (
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                ),
+                "upsert": "false",
+            },
+        )
+        _update_generated_memorial_status(
+            memorial_id,
+            status=STATUS_READY,
+            updated_at=now,
+        )
+    except Exception as error:
+        _remove_artifact_if_present(storage_settings.bucket, storage_path)
+        try:
+            _update_generated_memorial_status(
+                memorial_id,
+                status=STATUS_FAILED,
+                updated_at=now,
+            )
+        except Exception as update_error:
+            logger.warning(
+                "Generated memorial failure status update failed memorial_id=%s error_type=%s",
+                memorial_id,
+                type(update_error).__name__,
+            )
+        raise GeneratedMemorialStorageError(
+            "Falha ao persistir memorial gerado."
+        ) from error
+
+    return _response_from_record({**record, "status": STATUS_READY})
 
 
 def list_generated_memorials(memorial_type: str | None = None) -> list[GeneratedMemorialResponse]:

@@ -198,8 +198,24 @@ Isso evita depender silenciosamente de defaults implícitos ou de storage efême
 
 - O download consulta a metadata pelo `memorial_id` e valida `storage_bucket` e `storage_path` antes de gerar a URL assinada.
 - Se a metadata não existir, a API retorna `404`.
+- Se a metadata existir mas o `status` ainda não for `ready`, a API retorna `409` com erro previsível e não tenta servir o artefato.
 - Se o arquivo registrado não estiver mais disponível, a API retorna erro seguro sem expor path interno bruto.
 - A exclusão remove primeiro o objeto no storage e só depois remove a metadata, evitando que o histórico aponte para um artefato que falhou ao ser apagado.
+
+### Ciclo de estados dos memoriais persistidos
+
+O endpoint `POST /api/v1/memoriais/{memorial_type}/from-files/persist` usa um ciclo mínimo e compatível com o dashboard:
+
+1. cria a metadata com `status=processing`
+2. faz upload do DOCX final para o bucket configurado
+3. atualiza a metadata para `status=ready` somente após upload concluído
+4. se o upload ou a persistência falharem, tenta marcar a metadata como `status=failed`
+
+Com isso:
+
+- o histórico não precisa tratar uma falha como memorial concluído;
+- o download só é permitido para memoriais `ready`;
+- falhas de storage retornam erro seguro e previsível para a API.
 
 ---
 

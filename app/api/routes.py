@@ -219,6 +219,13 @@ def get_persisted_memorial_download(memorial_id: str, request: Request):
     record = get_generated_memorial_record(memorial_id)
     if record is None:
         return JSONResponse(status_code=404, content={"detail": "Memorial não encontrado."})
+    if record.get("status") != "ready":
+        return build_error_response(
+            status_code=409,
+            code="generated_memorial_not_ready",
+            message="Memorial ainda não está disponível para download.",
+            request_id=get_request_id(request),
+        )
     try:
         return GeneratedMemorialDownloadResponse(download_url=create_signed_download_url(record))
     except GeneratedMemorialArtifactNotFoundError:
@@ -337,6 +344,22 @@ async def create_persisted_memorial_from_files(
             format_sanitized_exception_trace(error),
         )
         return build_internal_server_error_response(request)
+    except GeneratedMemorialStorageError as error:
+        logger.error(
+            "Generated memorial persistence failed method=%s path=%s request_id=%s memorial_type=%s error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            memorial_type,
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_error_response(
+            status_code=503,
+            code="generated_memorial_storage_error",
+            message="Armazenamento do memorial indisponível.",
+            request_id=get_request_id(request),
+        )
     finally:
         _remove_file(output_path)
 

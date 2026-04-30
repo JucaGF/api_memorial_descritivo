@@ -250,3 +250,42 @@ Mapeamento inspecionado nesta iteração:
 ## Story RDY-005 concluída
 
 Tentativa bem-sucedida: 1
+
+## Iteração RDY-006: ciclo de geração, estados e falhas
+
+A próxima etapa de production readiness é validar o ciclo completo de geração.
+
+Objetivo:
+
+- garantir que cada geração tenha estado confiável;
+- garantir que falhas de extração, mapeamento, renderização, storage ou background task sejam refletidas corretamente;
+- impedir que geração falha apareça como concluída;
+- impedir download de artefato inexistente, parcial ou associado a geração falha;
+- melhorar testes de transições e falhas.
+
+Diretrizes:
+
+1. Trabalhar somente no backend.
+2. Não alterar frontend.
+3. Não alterar templates DOCX.
+4. Não adicionar fila externa.
+5. Não adicionar autenticação.
+6. Não criar arquitetura grande se o projeto atual puder ser endurecido com mudanças pequenas.
+7. Preservar contratos já usados pelo dashboard quando possível.
+8. Usar erros seguros e previsíveis.
+9. Registrar falhas com logging adequado.
+10. Rodar verify.py antes de concluir.
+
+### Mapeamento inspecionado na tentativa 1 de RDY-006
+
+- O fluxo síncrono persistido parte de `POST /api/v1/memoriais/{memorial_type}/from-files/persist` em `app/api/routes.py`.
+- Esse endpoint gera o DOCX localmente em arquivo temporário, delega a persistência final para `app/services/generated_memorial_store.py` e sempre remove o temporário no `finally`.
+- Antes desta tentativa, `create_generated_memorial` fazia upload do artefato e inseria a metadata já com `status=ready`, sem estado intermediário explícito durante a persistência.
+- Antes desta tentativa, o download persistido aceitava qualquer registro com `storage_bucket` e `storage_path` válidos, sem bloquear registros `processing` ou `failed`.
+- O histórico persistido já expõe `status` via `GeneratedMemorialResponse`, então endurecer a transição no store preserva o contrato existente com menor risco do que criar um modelo paralelo.
+- O fluxo de revisão por sessão já tinha estados explícitos (`processing`, `pending_review`, `failed`) e tratamento de falha em background; a lacuna principal desta tentativa estava no ciclo dos memoriais persistidos.
+
+
+## Story RDY-006 concluída
+
+Tentativa bem-sucedida: 1

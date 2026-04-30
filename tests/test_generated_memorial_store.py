@@ -55,6 +55,7 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
     def test_create_generated_memorial_uploads_docx_and_inserts_metadata(self) -> None:
         self._mock_client.storage.from_.return_value.upload.return_value = _mock_response([])
         self._table().insert.return_value.execute.return_value = _mock_response([])
+        self._table().update.return_value.eq.return_value.execute.return_value = _mock_response([])
         self._mock_client.storage.from_.return_value.create_signed_url.return_value = {
             "signedURL": "https://signed.example/download"
         }
@@ -75,10 +76,41 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
         inserted = self._table().insert.call_args[0][0]
         self.assertEqual(inserted["type"], "telecom")
         self.assertEqual(inserted["project_name"], "Memorial Telecom")
-        self.assertEqual(inserted["status"], "ready")
+        self.assertEqual(inserted["status"], "processing")
         self.assertEqual(inserted["observations"], "Observacao")
         self.assertEqual(inserted["pdf_filenames"], ["projeto.pdf"])
+        self.assertEqual(
+            self._table().update.call_args[0][0],
+            {"status": "ready", "updated_at": inserted["created_at"]},
+        )
         self.assertEqual(memorial.download_url, "https://signed.example/download")
+
+    def test_create_generated_memorial_marks_record_as_failed_when_upload_fails(self) -> None:
+        self._table().insert.return_value.execute.return_value = _mock_response([])
+        self._table().update.return_value.eq.return_value.execute.return_value = _mock_response([])
+        self._mock_client.storage.from_.return_value.upload.side_effect = RuntimeError("storage offline")
+
+        with NamedTemporaryFile(suffix=".docx") as temp_file:
+            Path(temp_file.name).write_bytes(b"PK\x03\x04docx")
+
+            with self.assertRaises(store.GeneratedMemorialStorageError):
+                store.create_generated_memorial(
+                    memorial_type="telecom",
+                    project_name="Memorial Telecom",
+                    output_path=Path(temp_file.name),
+                    pdf_filenames=["projeto.pdf"],
+                    observations="Observacao",
+                )
+
+        inserted = self._table().insert.call_args[0][0]
+        self.assertEqual(inserted["status"], "processing")
+        self.assertEqual(
+            self._table().update.call_args[0][0],
+            {
+                "status": "failed",
+                "updated_at": inserted["created_at"],
+            },
+        )
 
     def test_list_generated_memorials_filters_by_type_when_provided(self) -> None:
         self._table().select.return_value.order.return_value.eq.return_value.execute.return_value = (
