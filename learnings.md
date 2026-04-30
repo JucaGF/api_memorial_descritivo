@@ -218,3 +218,8 @@ Diretriz para logs:
 ## Story RDY-003 concluída
 
 Tentativa bem-sucedida: 1
+
+
+## Story RDY-004 concluída
+
+Tentativa bem-sucedida: 1
