@@ -43,6 +43,30 @@ O sistema já possui:
 - persistência opcional de sessão em Supabase
 - suíte de testes automatizados cobrindo serviços, stores, mapper e API
 
+## Respostas de erro
+
+Para production readiness, a API agora usa um tratamento global mínimo para erros de framework e falhas internas inesperadas.
+
+- Todas as respostas passam a devolver `X-Request-ID`.
+- Erros internos inesperados retornam `500` com mensagem genérica, sem stack trace nem mensagem bruta da exceção.
+- Erros de validação do FastAPI retornam `422` com `detail` legível e um envelope `error`.
+- `HTTPException` e rotas inexistentes preservam o status code e retornam um envelope previsível.
+
+Formato base:
+
+```json
+{
+  "detail": "Mensagem legada/compatível",
+  "error": {
+    "code": "internal_server_error",
+    "message": "Erro interno ao processar a requisição.",
+    "request_id": "..."
+  }
+}
+```
+
+Para validação, `error.details` contém os itens detalhados e `detail` continua trazendo a lista de erros para compatibilidade.
+
 Além disso, o próximo eixo de evolução do projeto é a implementação do memorial de gás, separado desde o início entre os cenários de **GLP** e **gás natural**.
 
 ---

@@ -63,6 +63,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         response = asyncio.run(
             routes.create_persisted_memorial_from_files(
                 "telecom",
+                MagicMock(),
                 files,
                 "Observacao",
             )

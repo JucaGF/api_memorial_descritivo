@@ -167,3 +167,54 @@ Diretriz para configuração:
 ## Story RDY-002 concluída
 
 Tentativa bem-sucedida: 1
+
+## Iteração RDY-003: erros, logs e respostas seguras
+
+As iterações anteriores adicionaram:
+
+- healthcheck e readiness check;
+- configuração segura por ambiente;
+- CORS explícito.
+
+A próxima prioridade é padronizar erros e logs para produção.
+
+Objetivo principal:
+
+- o usuário deve receber erros claros, consistentes e seguros;
+- o desenvolvedor deve ter logs suficientes para diagnosticar problemas;
+- nenhuma resposta HTTP deve vazar stack trace, segredo, variável sensível, path interno desnecessário ou detalhe bruto de exceção.
+
+Regras permanentes para esta iteração:
+
+1. Não alterar contratos principais da API sem necessidade.
+2. Não alterar frontend.
+3. Não alterar templates DOCX.
+4. Não alterar banco.
+5. Não adicionar Sentry, OpenTelemetry, APM ou dependência externa de observabilidade.
+6. Usar logging padrão do Python, salvo se o projeto já tiver outra solução.
+7. Não engolir exceções silenciosamente.
+8. Não retornar exception.message bruto para o usuário em erro 500.
+9. Logs podem ter detalhes técnicos, mas não podem conter secrets.
+10. Respostas HTTP devem seguir um formato previsível.
+11. Testes devem verificar que erros internos não vazam detalhes sensíveis.
+12. Healthcheck e readiness devem continuar funcionando.
+
+Diretriz para respostas de erro:
+
+- Erros esperados de validação ou regra de negócio devem retornar mensagem útil.
+- Erros internos inesperados devem retornar mensagem genérica.
+- O corpo da resposta deve ser consistente o suficiente para o frontend tratar.
+- A resposta deve incluir algum identificador de erro ou request id se for viável implementar de forma simples.
+
+Diretriz para logs:
+
+- Registrar erros internos com stack trace no log.
+- Registrar contexto útil, como path, método HTTP e tipo do erro.
+- Não registrar corpo de upload, arquivos, tokens ou secrets.
+- Não registrar variáveis de ambiente inteiras.
+- Não imprimir chaves de API, service role keys, URLs com credenciais ou Authorization headers.
+
+
+## Story RDY-003 concluída
+
+Tentativa bem-sucedida: 1

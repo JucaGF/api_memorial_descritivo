@@ -5,9 +5,14 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from app.api.errors import (
+    build_internal_server_error_response,
+    format_sanitized_exception_trace,
+    get_request_id,
+)
 from app.schemas.file_ingestion import FileIngestionResponse
 from app.schemas.generated_memorial import (
     GeneratedMemorialDownloadResponse,
@@ -231,15 +236,10 @@ def delete_persisted_memorial(memorial_id: str):
 )
 async def create_persisted_memorial_from_files(
     memorial_type: str,
+    request: Request,
     files: list[UploadFile] | None = File(default=None),
     observations: str | None = Form(default=None),
 ):
-    import logging
-    logging.warning(f"[DEBUG] memorial_type={memorial_type}, files={files}, observations={observations}")
-    if files:
-        for f in files:
-            logging.warning(f"[DEBUG] file: filename={f.filename}, content_type={f.content_type}, size={f.size}")
-
     if memorial_type not in _SUPPORTED_MEMORIAL_TYPES:
         return _unsupported_memorial_type_response(memorial_type)
 
@@ -259,18 +259,35 @@ async def create_persisted_memorial_from_files(
             observations=observations,
         )
     except MemorialValidationError as error:
-        import traceback
-        logging.warning(f"[DEBUG-ERR] MemorialValidationError: {error}\n{traceback.format_exc()}")
+        logger.warning(
+            "Generated memorial validation failed method=%s path=%s request_id=%s memorial_type=%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            memorial_type,
+        )
         return _validation_error_response(error, _validation_detail_for_type(memorial_type))
     except (FileIngestionError, ProjectExtractionError) as error:
-        import traceback
-        logging.warning(f"[DEBUG-ERR] {type(error).__name__}: {error}\n{traceback.format_exc()}")
+        logger.warning(
+            "Generated memorial client error method=%s path=%s request_id=%s memorial_type=%s error_type=%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            memorial_type,
+            type(error).__name__,
+        )
         return JSONResponse(status_code=400, content={"detail": str(error)})
     except MemorialRenderError as error:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Falha ao renderizar o memorial.", "error": str(error)},
+        logger.error(
+            "Generated memorial render failed method=%s path=%s request_id=%s memorial_type=%s error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            memorial_type,
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
     finally:
         _remove_file(output_path)
 
@@ -278,6 +295,7 @@ async def create_persisted_memorial_from_files(
 @router.post("/api/v1/memoriais/eletrico")
 def create_memorial_eletrico(
     payload: dict[str, Any],
+    request: Request,
     background_tasks: BackgroundTasks,
 ):
     with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
@@ -290,13 +308,15 @@ def create_memorial_eletrico(
         return _validation_error_response(error, "Payload invalido para o memorial eletrico v1.")
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Falha ao renderizar o memorial eletrico v1.",
-                "error": str(error),
-            },
+        logger.error(
+            "Memorial render failed method=%s path=%s request_id=%s memorial_type=eletrico error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     return _docx_file_response(output_path, background_tasks, "memorial_eletrico_v1.docx")
 
@@ -304,6 +324,7 @@ def create_memorial_eletrico(
 @router.post("/api/v1/memoriais/telecom")
 def create_memorial_telecom(
     payload: dict[str, Any],
+    request: Request,
     background_tasks: BackgroundTasks,
 ):
     with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
@@ -316,13 +337,15 @@ def create_memorial_telecom(
         return _validation_error_response(error, "Payload invalido para o memorial telecom v1.")
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Falha ao renderizar o memorial telecom v1.",
-                "error": str(error),
-            },
+        logger.error(
+            "Memorial render failed method=%s path=%s request_id=%s memorial_type=telecom error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     return _docx_file_response(output_path, background_tasks, "memorial_telecom_v1.docx")
 
@@ -330,6 +353,7 @@ def create_memorial_telecom(
 @router.post("/api/v1/memoriais/gas-natural")
 def create_memorial_gas_natural(
     payload: dict[str, Any],
+    request: Request,
     background_tasks: BackgroundTasks,
 ):
     with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
@@ -342,13 +366,15 @@ def create_memorial_gas_natural(
         return _validation_error_response(error, "Payload invalido para o memorial gas natural v1.")
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Falha ao renderizar o memorial gas natural v1.",
-                "error": str(error),
-            },
+        logger.error(
+            "Memorial render failed method=%s path=%s request_id=%s memorial_type=gas-natural error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     return _docx_file_response(output_path, background_tasks, "memorial_gas_natural_v1.docx")
 
@@ -356,6 +382,7 @@ def create_memorial_gas_natural(
 @router.post("/api/v1/memoriais/glp")
 def create_memorial_glp(
     payload: dict[str, Any],
+    request: Request,
     background_tasks: BackgroundTasks,
 ):
     with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
@@ -368,13 +395,15 @@ def create_memorial_glp(
         return _validation_error_response(error, "Payload invalido para o memorial GLP v1.")
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Falha ao renderizar o memorial GLP v1.",
-                "error": str(error),
-            },
+        logger.error(
+            "Memorial render failed method=%s path=%s request_id=%s memorial_type=glp error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     return _docx_file_response(output_path, background_tasks, "memorial_glp_v1.docx")
 
@@ -459,7 +488,12 @@ def _process_review_session(session_id: str, ingestion_result: FileIngestionResu
         )
         logger.info("Session %s extraction complete: status=%s", session_id, STATUS_PENDING_REVIEW)
     except Exception as error:
-        logger.error("Session %s extraction failed: %s", session_id, error)
+        logger.error(
+            "Session extraction failed session_id=%s error_type=%s\n%s",
+            session_id,
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
         update_session(session_id, status=STATUS_FAILED, error=str(error))
     finally:
         cleanup_ingestion_result(ingestion_result)
@@ -467,6 +501,7 @@ def _process_review_session(session_id: str, ingestion_result: FileIngestionResu
 
 @router.post("/api/v1/memoriais/eletrico/from-files")
 async def create_memorial_eletrico_from_files(
+    request: Request,
     background_tasks: BackgroundTasks,
     files: list[UploadFile] | None = File(default=None),
 ):
@@ -486,19 +521,22 @@ async def create_memorial_eletrico_from_files(
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Falha ao renderizar o memorial eletrico v1.",
-                "error": str(error),
-            },
+        logger.error(
+            "Memorial render from files failed method=%s path=%s request_id=%s memorial_type=eletrico error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     return _docx_file_response(output_path, background_tasks, "memorial_eletrico_v1.docx")
 
 
 @router.post("/api/v1/memoriais/telecom/from-files")
 async def create_memorial_telecom_from_files(
+    request: Request,
     background_tasks: BackgroundTasks,
     files: list[UploadFile] | None = File(default=None),
 ):
@@ -518,19 +556,22 @@ async def create_memorial_telecom_from_files(
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Falha ao renderizar o memorial telecom v1.",
-                "error": str(error),
-            },
+        logger.error(
+            "Memorial render from files failed method=%s path=%s request_id=%s memorial_type=telecom error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     return _docx_file_response(output_path, background_tasks, "memorial_telecom_v1.docx")
 
 
 @router.post("/api/v1/memoriais/gas-natural/from-files")
 async def create_memorial_gas_natural_from_files(
+    request: Request,
     background_tasks: BackgroundTasks,
     files: list[UploadFile] | None = File(default=None),
 ):
@@ -550,13 +591,15 @@ async def create_memorial_gas_natural_from_files(
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Falha ao renderizar o memorial gas natural v1.",
-                "error": str(error),
-            },
+        logger.error(
+            "Memorial render from files failed method=%s path=%s request_id=%s memorial_type=gas-natural error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     return _docx_file_response(output_path, background_tasks, "memorial_gas_natural_v1.docx")
 
@@ -585,6 +628,7 @@ async def upload_memorial_glp_files(
 
 @router.post("/api/v1/memoriais/glp/from-files")
 async def create_memorial_glp_from_files(
+    request: Request,
     background_tasks: BackgroundTasks,
     files: list[UploadFile] | None = File(default=None),
 ):
@@ -604,13 +648,15 @@ async def create_memorial_glp_from_files(
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Falha ao renderizar o memorial GLP v1.",
-                "error": str(error),
-            },
+        logger.error(
+            "Memorial render from files failed method=%s path=%s request_id=%s memorial_type=glp error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     return _docx_file_response(output_path, background_tasks, "memorial_glp_v1.docx")
 
@@ -673,7 +719,11 @@ def patch_review_session_context(session_id: str, payload: ContextCorrectionsPay
 
 
 @router.post("/api/v1/memoriais/eletrico/sessoes/{session_id}/gerar")
-def generate_from_review_session(session_id: str, background_tasks: BackgroundTasks):
+def generate_from_review_session(
+    session_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
     session = load_session(session_id)
     if session is None:
         return JSONResponse(status_code=404, content={"detail": "Sessão não encontrada."})
@@ -695,10 +745,16 @@ def generate_from_review_session(session_id: str, background_tasks: BackgroundTa
         return _validation_error_response(error, "Payload invalido para o memorial eletrico v1.")
     except MemorialRenderError as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Falha ao renderizar o memorial.", "error": str(error)},
+        logger.error(
+            "Reviewed memorial render failed method=%s path=%s request_id=%s session_id=%s error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            session_id,
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
         )
+        return build_internal_server_error_response(request)
 
     background_tasks.add_task(delete_session, session_id)
     return _docx_file_response(output_path, background_tasks, "memorial_eletrico_v1.docx")

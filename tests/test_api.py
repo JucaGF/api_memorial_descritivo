@@ -9,10 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta, timezone
 
 from docx import Document
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, create_app
 from app.services.extraction_mapper import ExtractionReport, MappingResult
+from app.services.memorial_renderer import MemorialRenderError
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
 from app.services.session_store import ReviewSession
@@ -37,6 +39,7 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/health/live")
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn("X-Request-ID", response.headers)
         body = response.json()
         self.assertEqual(body["status"], "ok")
         self.assertIn("timestamp", body)
@@ -62,6 +65,7 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/health/ready")
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn("X-Request-ID", response.headers)
         body = response.json()
         self.assertEqual(body["status"], "ok")
         self.assertEqual(
@@ -85,6 +89,7 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/health/ready")
 
         self.assertEqual(response.status_code, 503)
+        self.assertIn("X-Request-ID", response.headers)
         body = response.json()
         self.assertEqual(body["status"], "error")
         self.assertEqual(body["checks"][1]["name"], "templates")
@@ -131,6 +136,110 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("super-secret-openai", combined_body)
         self.assertNotIn("super-secret-supabase", combined_body)
         self.assertNotIn("postgres://user:password@example.com/db", combined_body)
+
+    def test_not_found_route_returns_safe_error_payload(self) -> None:
+        response = self.client.get("/nao-existe", headers={"X-Request-ID": "req-404"})
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.headers["X-Request-ID"], "req-404")
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "http_error")
+        self.assertEqual(body["error"]["message"], "Not Found")
+        self.assertEqual(body["error"]["request_id"], "req-404")
+
+    def test_fastapi_validation_error_returns_consistent_safe_payload(self) -> None:
+        temp_app = create_app()
+
+        @temp_app.get("/items/{item_id}")
+        def read_item(item_id: int) -> dict[str, int]:
+            return {"item_id": item_id}
+
+        client = TestClient(temp_app)
+
+        response = client.get("/items/abc", headers={"X-Request-ID": "req-422"})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.headers["X-Request-ID"], "req-422")
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "validation_error")
+        self.assertEqual(
+            body["error"]["message"],
+            "Dados inválidos na requisição.",
+        )
+        self.assertEqual(body["error"]["request_id"], "req-422")
+        self.assertTrue(body["error"]["details"])
+
+    def test_http_exception_preserves_status_code_with_consistent_payload(self) -> None:
+        temp_app = create_app()
+
+        @temp_app.get("/teapot")
+        def teapot() -> None:
+            raise HTTPException(status_code=418, detail="Sem café.")
+
+        client = TestClient(temp_app)
+
+        response = client.get("/teapot", headers={"X-Request-ID": "req-418"})
+
+        self.assertEqual(response.status_code, 418)
+        self.assertEqual(response.headers["X-Request-ID"], "req-418")
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "http_error")
+        self.assertEqual(body["error"]["message"], "Sem café.")
+        self.assertEqual(body["error"]["request_id"], "req-418")
+
+    def test_unexpected_internal_error_returns_safe_payload_without_leaking_details(self) -> None:
+        temp_app = create_app()
+
+        @temp_app.get("/boom")
+        def boom() -> None:
+            raise RuntimeError("OPENAI_API_KEY=super-secret\nTraceback: internal path /tmp/app.py")
+
+        client = TestClient(temp_app, raise_server_exceptions=False)
+
+        response = client.get("/boom", headers={"X-Request-ID": "req-500"})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.headers["X-Request-ID"], "req-500")
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "internal_server_error")
+        self.assertEqual(
+            body["error"]["message"],
+            "Erro interno ao processar a requisição.",
+        )
+        self.assertEqual(body["error"]["request_id"], "req-500")
+        response_text = response.text
+        self.assertNotIn("super-secret", response_text)
+        self.assertNotIn("OPENAI_API_KEY", response_text)
+        self.assertNotIn("Traceback", response_text)
+        self.assertNotIn("/tmp/app.py", response_text)
+
+    @patch("app.api.routes.generate_memorial_eletrico_v1")
+    def test_memorial_render_error_returns_safe_payload_without_raw_exception(
+        self,
+        generate_mock,
+    ) -> None:
+        payload = load_fixture("eletrico_com_subestacao.json")
+        generate_mock.side_effect = MemorialRenderError(
+            "OPENAI_API_KEY=super-secret renderer exploded"
+        )
+
+        response = self.client.post(
+            "/api/v1/memoriais/eletrico",
+            json=payload,
+            headers={"X-Request-ID": "req-render"},
+        )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.headers["X-Request-ID"], "req-render")
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "internal_server_error")
+        self.assertEqual(
+            body["error"]["message"],
+            "Erro interno ao processar a requisição.",
+        )
+        self.assertEqual(body["error"]["request_id"], "req-render")
+        self.assertNotIn("super-secret", response.text)
+        self.assertNotIn("OPENAI_API_KEY", response.text)
 
     def test_post_memorial_eletrico_returns_docx_for_valid_payload(self) -> None:
         payload = load_fixture("eletrico_com_subestacao.json")
