@@ -17,6 +17,12 @@ def _mock_response(data: list | dict | None = None) -> MagicMock:
 
 def _record(memorial_id: str = "abc-123", memorial_type: str = "telecom") -> dict:
     now = datetime.now(tz=timezone.utc).isoformat()
+    filename_by_type = {
+        "eletrico": "memorial_eletrico_v1.docx",
+        "telecom": "memorial_telecom_v1.docx",
+        "gas-natural": "memorial_gas_natural_v1.docx",
+        "glp": "memorial_glp_v1.docx",
+    }
     return {
         "id": memorial_id,
         "type": memorial_type,
@@ -25,7 +31,7 @@ def _record(memorial_id: str = "abc-123", memorial_type: str = "telecom") -> dic
         "observations": "Observacao",
         "pdf_filenames": ["projeto.pdf"],
         "storage_bucket": "generated-memorials",
-        "storage_path": f"{memorial_type}/{memorial_id}/memorial.docx",
+        "storage_path": f"{memorial_type}/{memorial_id}/{filename_by_type[memorial_type]}",
         "created_at": now,
         "updated_at": now,
     }
@@ -49,6 +55,7 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
     def test_create_generated_memorial_uploads_docx_and_inserts_metadata(self) -> None:
         self._mock_client.storage.from_.return_value.upload.return_value = _mock_response([])
         self._table().insert.return_value.execute.return_value = _mock_response([])
+        self._table().update.return_value.eq.return_value.execute.return_value = _mock_response([])
         self._mock_client.storage.from_.return_value.create_signed_url.return_value = {
             "signedURL": "https://signed.example/download"
         }
@@ -69,10 +76,41 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
         inserted = self._table().insert.call_args[0][0]
         self.assertEqual(inserted["type"], "telecom")
         self.assertEqual(inserted["project_name"], "Memorial Telecom")
-        self.assertEqual(inserted["status"], "ready")
+        self.assertEqual(inserted["status"], "processing")
         self.assertEqual(inserted["observations"], "Observacao")
         self.assertEqual(inserted["pdf_filenames"], ["projeto.pdf"])
+        self.assertEqual(
+            self._table().update.call_args[0][0],
+            {"status": "ready", "updated_at": inserted["created_at"]},
+        )
         self.assertEqual(memorial.download_url, "https://signed.example/download")
+
+    def test_create_generated_memorial_marks_record_as_failed_when_upload_fails(self) -> None:
+        self._table().insert.return_value.execute.return_value = _mock_response([])
+        self._table().update.return_value.eq.return_value.execute.return_value = _mock_response([])
+        self._mock_client.storage.from_.return_value.upload.side_effect = RuntimeError("storage offline")
+
+        with NamedTemporaryFile(suffix=".docx") as temp_file:
+            Path(temp_file.name).write_bytes(b"PK\x03\x04docx")
+
+            with self.assertRaises(store.GeneratedMemorialStorageError):
+                store.create_generated_memorial(
+                    memorial_type="telecom",
+                    project_name="Memorial Telecom",
+                    output_path=Path(temp_file.name),
+                    pdf_filenames=["projeto.pdf"],
+                    observations="Observacao",
+                )
+
+        inserted = self._table().insert.call_args[0][0]
+        self.assertEqual(inserted["status"], "processing")
+        self.assertEqual(
+            self._table().update.call_args[0][0],
+            {
+                "status": "failed",
+                "updated_at": inserted["created_at"],
+            },
+        )
 
     def test_list_generated_memorials_filters_by_type_when_provided(self) -> None:
         self._table().select.return_value.order.return_value.eq.return_value.execute.return_value = (
@@ -118,10 +156,19 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
 
         self._mock_client.storage.from_.assert_called_with("generated-memorials")
         self._mock_client.storage.from_.return_value.create_signed_url.assert_called_with(
-            "telecom/abc-123/memorial.docx",
+            "telecom/abc-123/memorial_telecom_v1.docx",
             3600,
         )
         self.assertEqual(url, "https://signed.example/download")
+
+    def test_create_signed_download_url_rejects_record_with_unexpected_storage_path(self) -> None:
+        record = _record()
+        record["storage_path"] = "../telecom/abc-123/memorial.docx"
+
+        with self.assertRaises(store.GeneratedMemorialStorageError):
+            store.create_signed_download_url(record)
+
+        self._mock_client.storage.from_.return_value.create_signed_url.assert_not_called()
 
     def test_delete_generated_memorial_removes_storage_object_and_record(self) -> None:
         self._table().select.return_value.eq.return_value.execute.return_value = (
@@ -135,7 +182,7 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
         self.assertTrue(deleted)
         self._mock_client.storage.from_.assert_called_with("generated-memorials")
         self._mock_client.storage.from_.return_value.remove.assert_called_once_with(
-            ["telecom/abc-123/memorial.docx"]
+            ["telecom/abc-123/memorial_telecom_v1.docx"]
         )
         self._table().delete.return_value.eq.assert_called_once_with("id", "abc-123")
 
@@ -146,6 +193,19 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
 
         self.assertFalse(deleted)
         self._mock_client.storage.from_.return_value.remove.assert_not_called()
+
+    def test_delete_generated_memorial_rejects_record_with_unexpected_storage_path(self) -> None:
+        record = _record()
+        record["storage_path"] = "../../other-bucket/secret.docx"
+        self._table().select.return_value.eq.return_value.execute.return_value = (
+            _mock_response([record])
+        )
+
+        with self.assertRaises(store.GeneratedMemorialStorageError):
+            store.delete_generated_memorial("abc-123")
+
+        self._mock_client.storage.from_.return_value.remove.assert_not_called()
+        self._table().delete.assert_not_called()
 
 
 if __name__ == "__main__":

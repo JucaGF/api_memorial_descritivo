@@ -43,6 +43,30 @@ O sistema já possui:
 - persistência opcional de sessão em Supabase
 - suíte de testes automatizados cobrindo serviços, stores, mapper e API
 
+## Respostas de erro
+
+Para production readiness, a API agora usa um tratamento global mínimo para erros de framework e falhas internas inesperadas.
+
+- Todas as respostas passam a devolver `X-Request-ID`.
+- Erros internos inesperados retornam `500` com mensagem genérica, sem stack trace nem mensagem bruta da exceção.
+- Erros de validação do FastAPI retornam `422` com `detail` legível e um envelope `error`.
+- `HTTPException` e rotas inexistentes preservam o status code e retornam um envelope previsível.
+
+Formato base:
+
+```json
+{
+  "detail": "Mensagem legada/compatível",
+  "error": {
+    "code": "internal_server_error",
+    "message": "Erro interno ao processar a requisição.",
+    "request_id": "..."
+  }
+}
+```
+
+Para validação, `error.details` contém os itens detalhados e `detail` continua trazendo a lista de erros para compatibilidade.
+
 Além disso, o próximo eixo de evolução do projeto é a implementação do memorial de gás, separado desde o início entre os cenários de **GLP** e **gás natural**.
 
 ---
@@ -144,6 +168,54 @@ A suíte de testes já vai além da renderização do template e cobre diferente
 - contratos da API
 - fluxo de sessão
 - pipeline de geração
+
+## Storage dos memoriais persistidos
+
+Os memoriais criados pelo endpoint `POST /api/v1/memoriais/{memorial_type}/from-files/persist` usam dois componentes distintos:
+
+1. metadata em `generated_memorials`
+2. arquivo DOCX em Supabase Storage
+
+O DOCX pode ser gerado temporariamente em filesystem local durante a renderização, mas esse arquivo é apenas transitório e é removido após o upload. A persistência real do artefato depende do bucket configurado.
+
+### Configuração recomendada
+
+- `GENERATED_MEMORIALS_BUCKET`: bucket privado onde os DOCX persistidos serão gravados
+- `GENERATED_MEMORIALS_SIGNED_URL_TTL`: tempo de vida da URL assinada de download
+- `SUPABASE_URL` e `SUPABASE_KEY`: credenciais usadas para metadata e storage
+
+### Regra de produção
+
+Em `APP_ENV=production`, o backend exige configuração explícita de:
+
+- `GENERATED_MEMORIALS_BUCKET`
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+
+Isso evita depender silenciosamente de defaults implícitos ou de storage efêmero para artefatos que precisam continuar disponíveis no histórico do dashboard.
+
+### Contrato de download e exclusão
+
+- O download consulta a metadata pelo `memorial_id` e valida `storage_bucket` e `storage_path` antes de gerar a URL assinada.
+- Se a metadata não existir, a API retorna `404`.
+- Se a metadata existir mas o `status` ainda não for `ready`, a API retorna `409` com erro previsível e não tenta servir o artefato.
+- Se o arquivo registrado não estiver mais disponível, a API retorna erro seguro sem expor path interno bruto.
+- A exclusão remove primeiro o objeto no storage e só depois remove a metadata, evitando que o histórico aponte para um artefato que falhou ao ser apagado.
+
+### Ciclo de estados dos memoriais persistidos
+
+O endpoint `POST /api/v1/memoriais/{memorial_type}/from-files/persist` usa um ciclo mínimo e compatível com o dashboard:
+
+1. cria a metadata com `status=processing`
+2. faz upload do DOCX final para o bucket configurado
+3. atualiza a metadata para `status=ready` somente após upload concluído
+4. se o upload ou a persistência falharem, tenta marcar a metadata como `status=failed`
+
+Com isso:
+
+- o histórico não precisa tratar uma falha como memorial concluído;
+- o download só é permitido para memoriais `ready`;
+- falhas de storage retornam erro seguro e previsível para a API.
 
 ---
 

@@ -1,48 +1,120 @@
 from __future__ import annotations
 
-import os
+import logging
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi import HTTPException as FastAPIHTTPException
 from fastapi.middleware.cors import CORSMiddleware
-
-load_dotenv()
-
-from app.api.routes import router as api_router
-
-
-app = FastAPI(title="API Memorial Descritivo")
-
-_default_cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
-_cors_origins = [
-    origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", _default_cors_origins).split(",")
-    if origin.strip()
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-import logging
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from app.api.errors import (
+    REQUEST_ID_HEADER,
+    VALIDATION_ERROR_MESSAGE,
+    build_error_response,
+    format_sanitized_exception_trace,
+    get_request_id,
+)
+from app.api.routes import router as api_router
+from app.config import AppSettings, get_settings
 
-@app.exception_handler(RequestValidationError)
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+
+def configure_logging() -> None:
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def create_app(settings: AppSettings | None = None) -> FastAPI:
+    configure_logging()
+    runtime_settings = settings or get_settings()
+    app = FastAPI(title="API Memorial Descritivo")
+    app.state.settings = runtime_settings
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=runtime_settings.cors_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.middleware("http")
+    async def attach_request_id(request: Request, call_next):
+        request_id = request.headers.get(REQUEST_ID_HEADER) or str(uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers[REQUEST_ID_HEADER] = request_id
+        return response
+
+    app.add_exception_handler(FastAPIHTTPException, http_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(Exception, general_exception_handler)
+    app.include_router(api_router)
+    return app
+
+
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    logging.warning(f"[DEBUG-VALIDATION] {exc.errors()}")
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    logger.warning(
+        "Request validation failed method=%s path=%s request_id=%s errors=%s",
+        request.method,
+        request.url.path,
+        get_request_id(request),
+        len(exc.errors()),
+    )
+    return build_error_response(
+        status_code=422,
+        code="validation_error",
+        message=VALIDATION_ERROR_MESSAGE,
+        request_id=get_request_id(request),
+        details=exc.errors(),
+        detail=exc.errors(),
+    )
 
-@app.exception_handler(Exception)
+
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    logger.warning(
+        "HTTP error method=%s path=%s request_id=%s status=%s",
+        request.method,
+        request.url.path,
+        get_request_id(request),
+        exc.status_code,
+    )
+    return build_error_response(
+        status_code=exc.status_code,
+        code="http_error",
+        message=str(exc.detail),
+        request_id=get_request_id(request),
+    )
+
+
 async def general_exception_handler(request: Request, exc: Exception):
-    logging.warning(f"[DEBUG-EXCEPTION] {type(exc).__name__}: {exc}")
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+    logger.error(
+        "Unhandled exception method=%s path=%s request_id=%s error_type=%s\n%s",
+        request.method,
+        request.url.path,
+        get_request_id(request),
+        type(exc).__name__,
+        format_sanitized_exception_trace(exc),
+    )
+    return build_error_response(
+        status_code=500,
+        code="internal_server_error",
+        message="Erro interno ao processar a requisição.",
+        request_id=get_request_id(request),
+    )
 
-app.include_router(api_router)
+
+app = create_app()
