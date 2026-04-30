@@ -169,6 +169,38 @@ A suíte de testes já vai além da renderização do template e cobre diferente
 - fluxo de sessão
 - pipeline de geração
 
+## Storage dos memoriais persistidos
+
+Os memoriais criados pelo endpoint `POST /api/v1/memoriais/{memorial_type}/from-files/persist` usam dois componentes distintos:
+
+1. metadata em `generated_memorials`
+2. arquivo DOCX em Supabase Storage
+
+O DOCX pode ser gerado temporariamente em filesystem local durante a renderização, mas esse arquivo é apenas transitório e é removido após o upload. A persistência real do artefato depende do bucket configurado.
+
+### Configuração recomendada
+
+- `GENERATED_MEMORIALS_BUCKET`: bucket privado onde os DOCX persistidos serão gravados
+- `GENERATED_MEMORIALS_SIGNED_URL_TTL`: tempo de vida da URL assinada de download
+- `SUPABASE_URL` e `SUPABASE_KEY`: credenciais usadas para metadata e storage
+
+### Regra de produção
+
+Em `APP_ENV=production`, o backend exige configuração explícita de:
+
+- `GENERATED_MEMORIALS_BUCKET`
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+
+Isso evita depender silenciosamente de defaults implícitos ou de storage efêmero para artefatos que precisam continuar disponíveis no histórico do dashboard.
+
+### Contrato de download e exclusão
+
+- O download consulta a metadata pelo `memorial_id` e valida `storage_bucket` e `storage_path` antes de gerar a URL assinada.
+- Se a metadata não existir, a API retorna `404`.
+- Se o arquivo registrado não estiver mais disponível, a API retorna erro seguro sem expor path interno bruto.
+- A exclusão remove primeiro o objeto no storage e só depois remove a metadata, evitando que o histórico aponte para um artefato que falhou ao ser apagado.
+
 ---
 
 # Fluxos disponíveis hoje

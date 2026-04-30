@@ -223,3 +223,30 @@ Tentativa bem-sucedida: 1
 ## Story RDY-004 concluída
 
 Tentativa bem-sucedida: 1
+
+
+## Iteração RDY-005: storage persistido dos memoriais gerados
+
+Mapeamento inspecionado nesta iteração:
+
+- Os endpoints públicos de histórico persistido ficam em `app/api/routes.py`:
+  - `GET /api/v1/memoriais`
+  - `GET /api/v1/memoriais/{memorial_id}`
+  - `GET /api/v1/memoriais/{memorial_id}/download`
+  - `DELETE /api/v1/memoriais/{memorial_id}`
+  - `POST /api/v1/memoriais/{memorial_type}/from-files/persist`
+- A metadata dos memoriais persistidos é salva na tabela Supabase `generated_memorials`.
+- O arquivo DOCX persistido é salvo em bucket Supabase Storage.
+- O fluxo atual de persistência gera o DOCX primeiro em arquivo temporário local, depois faz upload para o bucket e remove o temporário ao final.
+- Portanto, o filesystem local continua sendo apenas transitório para renderização; ele não deve ser a base de persistência em produção.
+- O registro salvo em metadata contém `storage_bucket` e `storage_path`, e o `storage_path` esperado segue o formato determinístico `{tipo}/{id}/{filename_oficial}`.
+- O endpoint de download primeiro localiza a metadata pelo `memorial_id` e depois resolve o acesso ao artefato via storage.
+- O endpoint de exclusão primeiro localiza a metadata, depois remove o artefato no storage e só então remove a metadata para evitar estado enganoso.
+- A configuração do storage persistido passou a ser tratada de forma central em `app.config`, em vez de múltiplos `os.getenv` espalhados no store.
+- Em `production`, o backend deve exigir configuração explícita de `GENERATED_MEMORIALS_BUCKET`, `SUPABASE_URL` e `SUPABASE_KEY` para os memoriais persistidos.
+- Em `local` e `test`, o bucket pode continuar com default simples, mas o contrato persistido ainda depende de Supabase quando esses endpoints forem usados.
+
+
+## Story RDY-005 concluída
+
+Tentativa bem-sucedida: 1

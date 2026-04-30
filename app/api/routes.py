@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.api.errors import (
+    build_error_response,
     build_internal_server_error_response,
     format_sanitized_exception_trace,
     get_request_id,
@@ -34,9 +35,11 @@ from app.services.file_ingestion import (
 from app.services.memorial_renderer import MemorialRenderError
 from app.services.memorial_validator import MemorialValidationError
 from app.services.generated_memorial_store import (
+    GeneratedMemorialArtifactNotFoundError,
+    GeneratedMemorialStorageError,
     create_generated_memorial,
-    delete_generated_memorial,
     create_signed_download_url,
+    delete_generated_memorial,
     get_generated_memorial,
     get_generated_memorial_record,
     list_generated_memorials,
@@ -212,19 +215,65 @@ def get_persisted_memorial(memorial_id: str):
     "/api/v1/memoriais/{memorial_id}/download",
     response_model=GeneratedMemorialDownloadResponse,
 )
-def get_persisted_memorial_download(memorial_id: str):
+def get_persisted_memorial_download(memorial_id: str, request: Request):
     record = get_generated_memorial_record(memorial_id)
     if record is None:
         return JSONResponse(status_code=404, content={"detail": "Memorial não encontrado."})
-    return GeneratedMemorialDownloadResponse(download_url=create_signed_download_url(record))
+    try:
+        return GeneratedMemorialDownloadResponse(download_url=create_signed_download_url(record))
+    except GeneratedMemorialArtifactNotFoundError:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "Arquivo do memorial não está mais disponível."},
+        )
+    except GeneratedMemorialStorageError as error:
+        logger.error(
+            "Generated memorial download failed method=%s path=%s request_id=%s memorial_id=%s error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            memorial_id,
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_error_response(
+            status_code=503,
+            code="generated_memorial_storage_error",
+            message="Armazenamento do memorial indisponível.",
+            request_id=get_request_id(request),
+        )
 
 
 @router.delete(
     "/api/v1/memoriais/{memorial_id}",
     status_code=204,
 )
-def delete_persisted_memorial(memorial_id: str):
-    if not delete_generated_memorial(memorial_id):
+def delete_persisted_memorial(memorial_id: str, request: Request):
+    try:
+        deleted = delete_generated_memorial(memorial_id)
+    except GeneratedMemorialArtifactNotFoundError:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "Arquivo do memorial não está mais disponível."},
+        )
+    except GeneratedMemorialStorageError as error:
+        logger.error(
+            "Generated memorial delete failed method=%s path=%s request_id=%s memorial_id=%s error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            memorial_id,
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_error_response(
+            status_code=503,
+            code="generated_memorial_storage_error",
+            message="Armazenamento do memorial indisponível.",
+            request_id=get_request_id(request),
+        )
+
+    if not deleted:
         return JSONResponse(status_code=404, content={"detail": "Memorial não encontrado."})
     return Response(status_code=204)
 

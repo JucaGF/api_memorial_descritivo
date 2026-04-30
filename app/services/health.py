@@ -7,7 +7,6 @@ from tempfile import gettempdir
 from typing import Any
 
 from app.config import ConfigurationError, get_settings
-from app.services.generated_memorial_store import GENERATED_MEMORIALS_BUCKET
 from app.services.memorial_renderer import (
     ELETRICO_V1_TEMPLATE_PATH,
     GAS_NATURAL_V1_TEMPLATE_PATH,
@@ -95,7 +94,7 @@ def _check_configuration() -> dict[str, str]:
     except ConfigurationError:
         return _build_check("configuration", "error", detail="invalid application configuration")
 
-    if not GENERATED_MEMORIALS_BUCKET.strip():
+    if not settings.generated_memorial_storage.bucket.strip():
         return _build_check("configuration", "error", detail="generated memorials bucket missing")
     return _build_check(
         "configuration",

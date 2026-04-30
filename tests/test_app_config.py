@@ -36,6 +36,8 @@ class AppConfigTests(unittest.TestCase):
                 **_base_env(),
                 "APP_ENV": "production",
                 "CORS_ALLOWED_ORIGINS": " https://dashboard.example.com, ,https://admin.example.com  ",
+                "SUPABASE_URL": "https://example.supabase.co",
+                "SUPABASE_KEY": "service-role-key",
             },
             clear=False,
         ):
@@ -67,6 +69,43 @@ class AppConfigTests(unittest.TestCase):
 
             with self.assertRaises(ConfigurationError):
                 importlib.reload(app.main)
+
+    def test_create_app_rejects_production_without_explicit_generated_memorial_bucket(self) -> None:
+        env = _base_env()
+        env.pop("GENERATED_MEMORIALS_BUCKET", None)
+        with patch.dict(
+            os.environ,
+            {
+                **env,
+                "APP_ENV": "production",
+                "CORS_ALLOWED_ORIGINS": "https://dashboard.example.com",
+                "SUPABASE_URL": "https://example.supabase.co",
+                "SUPABASE_KEY": "service-role-key",
+            },
+            clear=True,
+        ):
+            from app.config import ConfigurationError, get_settings
+
+            with self.assertRaises(ConfigurationError):
+                get_settings()
+
+    def test_create_app_rejects_production_without_supabase_credentials_for_generated_memorials(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                **_base_env(),
+                "APP_ENV": "production",
+                "CORS_ALLOWED_ORIGINS": "https://dashboard.example.com",
+                "GENERATED_MEMORIALS_BUCKET": "generated-memorials",
+                "SUPABASE_URL": "",
+                "SUPABASE_KEY": "",
+            },
+            clear=True,
+        ):
+            from app.config import ConfigurationError, get_settings
+
+            with self.assertRaises(ConfigurationError):
+                get_settings()
 
     def test_cors_allows_explicit_origin(self) -> None:
         from app.config import AppEnvironment, AppSettings
