@@ -123,3 +123,47 @@ Esses pontos podem virar iterações futuras.
 ## Story RDY-001 concluída
 
 Tentativa bem-sucedida: 1
+
+## Iteração RDY-002: configuração segura e CORS
+
+A iteração anterior adicionou healthcheck e readiness check.
+
+A próxima prioridade é preparar a API para ambientes diferentes:
+
+- local;
+- test;
+- production.
+
+A API deve ter uma fonte clara de configuração, evitando variáveis lidas de forma espalhada e implícita pelo código.
+
+Cuidados principais:
+
+1. Não usar CORS aberto em produção.
+2. Não aceitar fallback inseguro em produção.
+3. Não expor secrets em logs, respostas HTTP ou mensagens de erro.
+4. Validar variáveis obrigatórias de produção no startup ou em camada de configuração.
+5. Manter o ambiente local simples de rodar.
+6. Manter testes independentes de variáveis reais do Railway.
+7. Não quebrar o healthcheck criado na iteração anterior.
+8. Não quebrar endpoints usados pelo dashboard.
+
+Diretriz para CORS:
+
+- Em desenvolvimento local, permitir origens locais do dashboard, como localhost e 127.0.0.1.
+- Em produção, permitir apenas a URL real do dashboard.
+- A origem do dashboard deve vir de variável de ambiente, não hardcoded em código de produção.
+- Se a aplicação ainda não tiver a URL final do dashboard em produção, documentar a variável necessária no Railway.
+
+Diretriz para configuração:
+
+- Antes de criar uma nova abordagem, verificar se o projeto já tem módulo de settings/config.
+- Se já houver uma abordagem, estender a abordagem existente.
+- Se não houver, criar uma camada simples e testável.
+- Não adicionar pydantic-settings sem necessidade.
+- Se pydantic-settings já existir no projeto, pode ser usado.
+- Se for adicionar nova dependência, justificar claramente.
+
+
+## Story RDY-002 concluída
+
+Tentativa bem-sucedida: 1

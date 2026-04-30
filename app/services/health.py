@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import gettempdir
 from typing import Any
 
+from app.config import ConfigurationError, get_settings
 from app.services.generated_memorial_store import GENERATED_MEMORIALS_BUCKET
 from app.services.memorial_renderer import (
     ELETRICO_V1_TEMPLATE_PATH,
@@ -89,9 +90,18 @@ def _check_storage() -> dict[str, str]:
 
 
 def _check_configuration() -> dict[str, str]:
+    try:
+        settings = get_settings()
+    except ConfigurationError:
+        return _build_check("configuration", "error", detail="invalid application configuration")
+
     if not GENERATED_MEMORIALS_BUCKET.strip():
         return _build_check("configuration", "error", detail="generated memorials bucket missing")
-    return _build_check("configuration", "ok")
+    return _build_check(
+        "configuration",
+        "ok",
+        detail=f"environment={settings.app_env}, cors={settings.readiness_configuration_status}",
+    )
 
 
 def _check_session_backend() -> dict[str, str]:
