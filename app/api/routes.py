@@ -36,6 +36,7 @@ from app.services.generated_memorial_store import (
     get_generated_memorial_record,
     list_generated_memorials,
 )
+from app.services.health import get_liveness_payload, get_readiness_payload
 from app.services.pipeline import (
     generate_memorial_eletrico_v1,
     generate_memorial_gas_natural_v1,
@@ -74,6 +75,18 @@ _PROJECT_NAME_BY_TYPE = {
     "gas-natural": "Memorial Gás Natural",
     "glp": "Memorial GLP",
 }
+
+
+@router.get("/health/live")
+def health_live():
+    return get_liveness_payload()
+
+
+@router.get("/health/ready")
+def health_ready():
+    payload = get_readiness_payload()
+    status_code = 200 if payload["status"] == "ok" else 503
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 def _remove_file(path: Path) -> None:

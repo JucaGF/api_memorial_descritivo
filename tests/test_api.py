@@ -33,6 +33,105 @@ class ApiTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.client = TestClient(app)
 
+    def test_health_live_returns_200_with_safe_json(self) -> None:
+        response = self.client.get("/health/live")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("timestamp", body)
+        self.assertEqual(len(body["checks"]), 1)
+        self.assertEqual(body["checks"][0]["name"], "app")
+        self.assertEqual(body["checks"][0]["status"], "ok")
+
+    @patch(
+        "app.api.routes.get_readiness_payload",
+        return_value={
+            "status": "ok",
+            "timestamp": "2026-04-30T12:00:00+00:00",
+            "checks": [
+                {"name": "app", "status": "ok"},
+                {"name": "templates", "status": "ok"},
+                {"name": "storage", "status": "ok"},
+                {"name": "configuration", "status": "ok"},
+            ],
+        },
+        create=True,
+    )
+    def test_health_ready_returns_200_when_checks_pass(self, _) -> None:
+        response = self.client.get("/health/ready")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(
+            [check["name"] for check in body["checks"]],
+            ["app", "templates", "storage", "configuration"],
+        )
+
+    @patch(
+        "app.api.routes.get_readiness_payload",
+        return_value={
+            "status": "error",
+            "timestamp": "2026-04-30T12:00:00+00:00",
+            "checks": [
+                {"name": "app", "status": "ok"},
+                {"name": "templates", "status": "error"},
+            ],
+        },
+        create=True,
+    )
+    def test_health_ready_returns_503_when_critical_check_fails(self, _) -> None:
+        response = self.client.get("/health/ready")
+
+        self.assertEqual(response.status_code, 503)
+        body = response.json()
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["checks"][1]["name"], "templates")
+        self.assertEqual(body["checks"][1]["status"], "error")
+
+    @patch(
+        "app.api.routes.get_readiness_payload",
+        return_value={
+            "status": "ok",
+            "timestamp": "2026-04-30T12:00:00+00:00",
+            "checks": [
+                {
+                    "name": "configuration",
+                    "status": "ok",
+                    "detail": "configured",
+                }
+            ],
+        },
+        create=True,
+    )
+    def test_health_endpoints_do_not_expose_sensitive_values(self, _) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENAI_API_KEY": "super-secret-openai",
+                "SUPABASE_SERVICE_ROLE_KEY": "super-secret-supabase",
+                "DATABASE_URL": "postgres://user:password@example.com/db",
+            },
+            clear=False,
+        ):
+            live_response = self.client.get("/health/live")
+            ready_response = self.client.get("/health/ready")
+
+        self.assertEqual(live_response.status_code, 200)
+        self.assertEqual(ready_response.status_code, 200)
+
+        combined_body = json.dumps(
+            {
+                "live": live_response.json(),
+                "ready": ready_response.json(),
+            },
+            ensure_ascii=False,
+        )
+        self.assertNotIn("super-secret-openai", combined_body)
+        self.assertNotIn("super-secret-supabase", combined_body)
+        self.assertNotIn("postgres://user:password@example.com/db", combined_body)
+
     def test_post_memorial_eletrico_returns_docx_for_valid_payload(self) -> None:
         payload = load_fixture("eletrico_com_subestacao.json")
 
