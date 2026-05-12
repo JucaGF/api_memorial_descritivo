@@ -106,7 +106,7 @@ class SomaExtraction(BaseModel):
 
 
 class RamalExtraction(BaseModel):
-    primario_diametro: float | int | None = None
+    primario_diametro: str | None = None
     primario_material: str | None = None
     primario_pavimento: str | None = None
 
@@ -340,7 +340,7 @@ Look for the total utilization points.
 
 ### ramal
 Look for internal primary branch details.
-- primario_diametro: ALWAYS return the diameter in millimeters. If the drawing shows inches such as `1 1/4"`, convert to mm before returning the value.
+- primario_diametro: preserve the notation exactly as shown in the source, such as `1 1/4"` or `32 mm`.
 - primario_material
 - primario_pavimento
 
@@ -359,8 +359,7 @@ Look for the sheet number associated with the relevant cut/detail.
 - Extract ONLY from evidence visible in the images or OCR text.
 - Return null for any field without sufficient evidence.
 - NEVER invent or guess values.
-- Numeric fields must be numbers, not strings.
-- For `ramal.primario_diametro`, output the numeric value in millimeters even if the source notation is in inches.
+- Numeric fields must be numbers, not strings, except `ramal.primario_diametro`, which must preserve the source notation as a string.
 - In observacoes, briefly note ambiguities or extraction limitations.
 """
 
@@ -422,7 +421,7 @@ Look for the total utilization points.
 
 ### ramal
 Look for internal primary branch details.
-- primario_diametro
+- primario_diametro: preserve the notation exactly as shown in the source, such as `1 1/4"` or `32 mm`.
 - primario_material
 - primario_pavimento
 
@@ -437,7 +436,7 @@ Look for the sheet number associated with the relevant cut/detail.
 - Extract ONLY from evidence visible in the images or OCR text.
 - Return null for any field without sufficient evidence.
 - NEVER invent or guess values.
-- Numeric fields must be numbers, not strings.
+- Numeric fields must be numbers, not strings, except `ramal.primario_diametro`, which must preserve the source notation as a string.
 - In observacoes, briefly note ambiguities or extraction limitations.
 """
 
@@ -1080,7 +1079,9 @@ def extract_gas_natural_with_llm(source_files: list[ExtractedSourceFile]) -> dic
     )
 
     t0 = time.monotonic()
-    if _should_use_combined_text_extraction(usable_files):
+    if _should_use_combined_text_extraction(usable_files) and not any(
+        sf.page_images for sf in usable_files
+    ):
         logger.info("Using single combined gas natural text extraction for %d files", len(usable_files))
         merged = _extract_combined_text(
             client,

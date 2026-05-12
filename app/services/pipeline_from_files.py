@@ -47,12 +47,6 @@ logger = logging.getLogger(__name__)
 _GLP_CONFLICTS_KEY = "_glp_total_points_conflicts"
 _GLP_AUTHORITATIVE_TOTAL_KEY = "_glp_authoritative_total_points"
 _GLP_DIMENSIONAMENTO_FIELDS = ("qtd_fogao", "qtd_aquecedor", "qtd_churrasqueira")
-_FRACTIONAL_INCH_RE = re.compile(
-    r'^\s*(?:(?P<whole>\d+)\s+)?(?:(?P<num>\d+)\s*/\s*(?P<den>\d+)|(?P<decimal>\d+(?:[.,]\d+)?))\s*(?:"|pol(?:egadas?)?)\s*$',
-    re.IGNORECASE,
-)
-_MM_VALUE_RE = re.compile(r"^\s*(?P<value>\d+(?:[.,]\d+)?)\s*mm\s*$", re.IGNORECASE)
-
 
 def _fill_gaps(base: dict[str, Any], supplement: dict[str, Any]) -> dict[str, Any]:
     """Supplement fills only fields that are missing or None in base."""
@@ -90,34 +84,6 @@ def _apply_glp_authoritative_mapper_overrides(
     )
     overridden[_GLP_AUTHORITATIVE_TOTAL_KEY] = total_points
     return overridden
-
-
-def _parse_diameter_mm(value: Any) -> float | int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return value
-    if not isinstance(value, str):
-        return None
-
-    mm_match = _MM_VALUE_RE.match(value)
-    if mm_match:
-        return round(float(mm_match.group("value").replace(",", ".")), 1)
-
-    inch_match = _FRACTIONAL_INCH_RE.match(value)
-    if not inch_match:
-        return None
-
-    whole = int(inch_match.group("whole") or 0)
-    decimal = inch_match.group("decimal")
-    if decimal is not None:
-        inches = whole + float(decimal.replace(",", "."))
-    else:
-        numerator = int(inch_match.group("num"))
-        denominator = int(inch_match.group("den"))
-        inches = whole + (numerator / denominator)
-
-    return round(inches * 25.4, 1)
 
 
 def _normalize_glp_pavimento(value: Any) -> Any:
@@ -250,11 +216,6 @@ def _normalize_glp_non_total_fields(context: dict[str, Any]) -> dict[str, Any]:
     if isinstance(ramal, dict):
         ramal_updates: dict[str, Any] = {}
 
-        diametro = ramal.get("primario_diametro")
-        normalized_diameter = _parse_diameter_mm(diametro)
-        if normalized_diameter is not None:
-            ramal_updates["primario_diametro"] = normalized_diameter
-
         primario_pavimento = _normalize_glp_pavimento(ramal.get("primario_pavimento"))
         if primario_pavimento is not None:
             ramal_updates["primario_pavimento"] = primario_pavimento
@@ -273,6 +234,51 @@ def _normalize_glp_context(context: dict[str, Any]) -> dict[str, Any]:
     normalized_context = _normalize_glp_non_total_fields(context)
     reconciled_context, _ = _reconcile_glp_total_points(normalized_context)
     return reconciled_context
+
+
+def _derive_gas_natural_total_points(context: dict[str, Any]) -> dict[str, Any]:
+    dimensionamento = context.get("dimensionamento")
+    if not isinstance(dimensionamento, dict):
+        return context
+
+    counts = [
+        dimensionamento.get("qtd_fogao"),
+        dimensionamento.get("qtd_aquecedor"),
+        dimensionamento.get("qtd_churrasqueira"),
+    ]
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in counts):
+        return context
+
+    soma = context.get("soma")
+    current_total = soma.get("qtd_pontos_de_utilizacao") if isinstance(soma, dict) else None
+    if current_total is not None:
+        return context
+
+    return merge_context(
+        context,
+        {"soma": {"qtd_pontos_de_utilizacao": sum(counts)}},
+    )
+
+
+def _normalize_gas_natural_context(context: dict[str, Any]) -> dict[str, Any]:
+    ramal = context.get("ramal")
+    normalized_context = context
+
+    if isinstance(ramal, dict):
+        ramal_updates: dict[str, Any] = {}
+
+        primario_pavimento = _normalize_glp_pavimento(ramal.get("primario_pavimento"))
+        if primario_pavimento is not None:
+            ramal_updates["primario_pavimento"] = primario_pavimento
+
+        if ramal_updates:
+            normalized_context = merge_context(normalized_context, {"ramal": ramal_updates})
+
+    teto_ou_piso = _normalize_glp_teto_ou_piso(normalized_context.get("teto_ou_piso"))
+    if teto_ou_piso is not None:
+        normalized_context = merge_context(normalized_context, {"teto_ou_piso": teto_ou_piso})
+
+    return _derive_gas_natural_total_points(normalized_context)
 
 
 def _attach_glp_conflicts(
@@ -438,6 +444,7 @@ def extract_gas_natural_mapping_from_ingested_files(
             final_context = merge_context(llm_context, gap_fills)
         else:
             final_context = llm_context
+        final_context = _normalize_gas_natural_context(final_context)
 
         mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
         report = assess_gas_natural_extraction_coverage(mapping)
@@ -449,6 +456,10 @@ def extract_gas_natural_mapping_from_ingested_files(
 
     extraction_result = extract_project_files(files)
     mapping = map_extraction_to_partial_gas_natural_context(extraction_result)
+    mapping = MappingResult(
+        context=_normalize_gas_natural_context(mapping.context),
+        evidence=mapping.evidence,
+    )
     report = assess_gas_natural_extraction_coverage(mapping)
     logger.info(
         "Gas natural extraction coverage: filled=%d, missing=%d, pending=%d",

@@ -558,7 +558,7 @@ class ExtractWithLLMTests(unittest.TestCase):
 
     @patch("app.services.llm_extractor._get_client")
     @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
-    def test_gas_natural_multiple_rich_text_files_use_single_combined_extraction(
+    def test_gas_natural_multiple_rich_text_only_files_use_single_combined_extraction(
         self,
         _model_mock,
         client_mock,
@@ -571,8 +571,8 @@ class ExtractWithLLMTests(unittest.TestCase):
         client_mock.return_value = mock_client
 
         files = [
-            _source_file("a.pdf", "GAS " * 2000, ["data:image/png;base64,AAA"]),
-            _source_file("b.pdf", "GAS " * 2000, ["data:image/png;base64,BBB"]),
+            _source_file("a.pdf", "GAS " * 2000),
+            _source_file("b.pdf", "GAS " * 2000),
         ]
         with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
             result = extract_gas_natural_with_llm(files)
@@ -583,6 +583,45 @@ class ExtractWithLLMTests(unittest.TestCase):
         self.assertFalse(any(part.get("type") == "input_image" for part in content))
         self.assertNotIn("reasoning", kwargs)
         self.assertEqual(result["obra"]["construtora"], "Gas Combined")
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_gas_natural_multiple_rich_files_with_images_use_per_file_vision_merge(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        extraction_a = GasNaturalLLMExtraction(obra=ObraExtraction(construtora="Alpha"))
+        extraction_b = GasNaturalLLMExtraction(valvula={"esfera_diametro": "32 mm"})
+        merged_result = GasNaturalLLMExtraction(
+            obra=ObraExtraction(construtora="Alpha"),
+            valvula={"esfera_diametro": "32 mm"},
+        )
+        response_a = MagicMock()
+        response_a.output_parsed = extraction_a
+        response_b = MagicMock()
+        response_b.output_parsed = extraction_b
+        merge_response = MagicMock()
+        merge_response.output_parsed = merged_result
+
+        mock_client = MagicMock()
+        mock_client.responses.parse.side_effect = [response_a, response_b, merge_response]
+        client_mock.return_value = mock_client
+
+        files = [
+            _source_file("a.pdf", "GAS " * 2000, ["data:image/png;base64,AAA"]),
+            _source_file("b.pdf", "GAS " * 2000, ["data:image/png;base64,BBB"]),
+        ]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_gas_natural_with_llm(files)
+
+        first_call = mock_client.responses.parse.call_args_list[0].kwargs
+        first_content = first_call["input"][0]["content"]
+        self.assertEqual(mock_client.responses.parse.call_count, 3)
+        self.assertTrue(any(part.get("type") == "input_image" for part in first_content))
+        self.assertEqual(first_call["reasoning"], {"effort": "high"})
+        self.assertEqual(result["obra"]["construtora"], "Alpha")
+        self.assertEqual(result["valvula"]["esfera_diametro"], "32 mm")
 
     def test_extract_glp_returns_empty_when_disabled(self) -> None:
         with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):

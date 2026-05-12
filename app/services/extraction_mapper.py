@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -168,6 +169,12 @@ _GENERATOR_BOARD_RE = re.compile(
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _ascii_key(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", ascii_text.casefold()).strip()
 
 
 def _looks_like_building_name(text: str) -> bool:
@@ -632,6 +639,214 @@ def _extract_glp_total_points_from_quantitative_tables(text: str) -> FieldExtrac
     )
 
 
+def _normalize_gas_natural_pavimento(value: str) -> str:
+    key = _ascii_key(value)
+    if "terreo" in key:
+        return "térreo"
+    if "subsolo" in key:
+        return "subsolo"
+    if "cobertura" in key or "coberta" in key:
+        return "cobertura"
+    pavimento_match = re.search(r"\b(\d+)\s*(?:o|pav|pavimento)\b", key)
+    if pavimento_match:
+        return f"{int(pavimento_match.group(1))} pavimento"
+    return value.strip().lower()
+
+
+def _extract_gas_natural_floor_near_label(
+    text: str,
+    label_pattern: str,
+    rule: str,
+) -> FieldExtraction | None:
+    floor_pattern = r"(subsolo|t[ée]rreo|terreo|cobertura|coberta|\d+[ºo]?\s*pav(?:imento)?)"
+    patterns = (
+        rf"\b{label_pattern}\b.{{0,120}}\b{floor_pattern}\b",
+        rf"\b{floor_pattern}\b.{{0,120}}\b{label_pattern}\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            floor = match.group(1)
+            return FieldExtraction(
+                value=_normalize_gas_natural_pavimento(floor),
+                evidence=_normalize_text(match.group(0)),
+                rule=rule,
+                confidence="medium",
+            )
+    return None
+
+
+def _extract_gas_natural_crm_pavimento(text: str) -> FieldExtraction | None:
+    return _extract_gas_natural_floor_near_label(
+        text=text,
+        label_pattern=r"CRM",
+        rule="gas_natural_crm_floor_regex",
+    )
+
+
+def _extract_gas_natural_ramal_pavimento(text: str) -> FieldExtraction | None:
+    return _extract_gas_natural_floor_near_label(
+        text=text,
+        label_pattern=r"ramal(?:\s+interno)?(?:\s+prim[aá]rio)?",
+        rule="gas_natural_primary_branch_floor_regex",
+    )
+
+
+def _extract_gas_natural_ramal_diametro(text: str) -> FieldExtraction | None:
+    diameter_value = (
+        r"((?:\d+\s+)?\d+\s*/\s*\d+\s*(?:\"|pol(?:egadas?)?)|"
+        r"\d+(?:[,.]\d+)?\s*mm|"
+        r"\d+(?:[,.]\d+)?\s*(?:\"|pol(?:egadas?)?))"
+    )
+    patterns = (
+        rf"ramal(?:\s+interno)?(?:\s+prim[aá]rio)?.{{0,120}}?(?:DN|Ø|diam(?:etro)?|di[âa]metro)?\s*{diameter_value}",
+        rf"(?:DN|Ø|diam(?:etro)?|di[âa]metro)?\s*{diameter_value}.{{0,120}}?ramal(?:\s+interno)?(?:\s+prim[aá]rio)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            return FieldExtraction(
+                value=_normalize_text(match.group(1)),
+                evidence=_normalize_text(match.group(0)),
+                rule="gas_natural_primary_branch_diameter_regex",
+                confidence="medium",
+            )
+    return None
+
+
+def _extract_gas_natural_ramal_material(text: str) -> FieldExtraction | None:
+    match = re.search(
+        r"ramal(?:\s+interno)?(?:\s+prim[aá]rio)?.{0,160}",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    window = match.group(0) if match else text
+    key = _ascii_key(window)
+    materials = (
+        ("aco carbono", "aço carbono"),
+        ("aco galvanizado", "aço galvanizado"),
+        ("cobre", "cobre"),
+        ("pead", "PEAD"),
+    )
+    for marker, value in materials:
+        if marker in key:
+            return FieldExtraction(
+                value=value,
+                evidence=_normalize_text(window),
+                rule="gas_natural_primary_branch_material_regex",
+                confidence="medium",
+            )
+    return None
+
+
+def _extract_gas_natural_valvula_esfera_diametro(text: str) -> FieldExtraction | None:
+    pattern = r"v[áa]lvula(?:\s+de)?\s+esfera.{0,80}?(?:DN|Ø)?\s*(\d+(?:[,.]\d+)?)\s*mm"
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    value = f"{match.group(1).replace(',', '.')} mm"
+    return FieldExtraction(
+        value=value,
+        evidence=_normalize_text(match.group(0)),
+        rule="gas_natural_ball_valve_diameter_regex",
+        confidence="medium",
+    )
+
+
+def _extract_gas_natural_teto_ou_piso(text: str) -> FieldExtraction | None:
+    patterns = (
+        r"ramal(?:\s+interno)?(?:\s+prim[aá]rio)?.{0,120}\b(teto|piso|contrapiso|enterrado)\b",
+        r"\bpelo\s+(teto|piso|contrapiso)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            value = _ascii_key(match.group(1))
+            return FieldExtraction(
+                value=value,
+                evidence=_normalize_text(match.group(0)),
+                rule="gas_natural_branch_path_regex",
+                confidence="medium",
+            )
+    return None
+
+
+def _extract_gas_natural_qtd_churrasqueira(text: str) -> FieldExtraction | None:
+    for pattern in (
+        r"churrasqueiras?\s*[:\-]?\s*(\d+)\b",
+        r"\b(\d+)[ \t]*churrasqueiras?\b",
+    ):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return FieldExtraction(
+                value=int(match.group(1)),
+                evidence=match.group(0),
+                rule="gas_natural_churrasqueira_count_regex",
+                confidence="medium",
+            )
+
+    key = _ascii_key(text)
+    if "churrasqueira" not in key and ("fogao" in key or "pontos" in key):
+        return FieldExtraction(
+            value=0,
+            evidence="dimensionamento sem churrasqueira identificada",
+            rule="gas_natural_no_churrasqueira_default",
+            confidence="low",
+        )
+    return None
+
+
+def _extract_gas_natural_qtd_aquecedor(text: str) -> FieldExtraction | None:
+    extraction = _extract_glp_quantity_from_patterns(
+        text=text,
+        patterns=(
+            r"(\d+)[ \t]*aquecedores?\b",
+            r"aquecedores?\s*[:\-]?\s*(\d+)\b",
+        ),
+        rule="gas_natural_heater_count_regex",
+    )
+    if extraction is not None:
+        return extraction
+
+    key = _ascii_key(text)
+    if "aquecedor" not in key and ("fogao" in key or "pontos" in key):
+        return FieldExtraction(
+            value=0,
+            evidence="dimensionamento sem aquecedor identificado",
+            rule="gas_natural_no_heater_default",
+            confidence="low",
+        )
+    return None
+
+
+def _extract_gas_natural_numero_prancha(
+    extraction_result: ProjectExtractionResult,
+) -> FieldExtraction | None:
+    source_files = extraction_result.source_files
+    if not source_files:
+        return None
+
+    total_files = extraction_result.signals.get("total_files")
+    if not isinstance(total_files, int) or total_files <= 0:
+        total_files = len(source_files)
+
+    candidates = sorted(
+        source_files,
+        key=lambda sf: 0 if "corte" in _ascii_key(sf.original_filename) else 1,
+    )
+    for source_file in candidates:
+        match = re.match(r"\D*(\d{1,2})", source_file.original_filename)
+        if match:
+            sheet_number = int(match.group(1))
+            return FieldExtraction(
+                value=f"{sheet_number:02d}/{total_files:02d}",
+                evidence=source_file.original_filename,
+                rule="gas_natural_sheet_number_from_filename",
+                confidence="medium",
+            )
+    return None
+
+
 def _extract_nao_inclusos(raw_text: str) -> dict[str, FieldExtraction]:
     """Detecta sistemas especializados por label de quadro.
     Presença de circuito → False (incluído). Ausência → True (não incluso).
@@ -959,6 +1174,21 @@ def map_extraction_to_partial_gas_natural_context(
     add("obra.localizacao", _extract_localizacao(raw_text))
     add("obra.numero_cadastro", _extract_numero_cadastro(raw_text))
     add("obra.qtd_apartamentos", _extract_qtd_apartamentos(text))
+    add("obra.tipo_edificacao", _extract_telecom_tipo_edificacao(text))
+    add("obra.tipologia", _extract_telecom_tipologia(text))
+    add("obra.qtd_lojas", _extract_telecom_qtd_lojas(text))
+    add("obra.qtd_restaurantes", _extract_telecom_qtd_restaurantes(text))
+    add("crm.pavimento", _extract_gas_natural_crm_pavimento(raw_text))
+    add("dimensionamento.qtd_fogao", _extract_glp_qtd_fogao(text))
+    add("dimensionamento.qtd_aquecedor", _extract_gas_natural_qtd_aquecedor(text))
+    add("dimensionamento.qtd_churrasqueira", _extract_gas_natural_qtd_churrasqueira(text))
+    add("soma.qtd_pontos_de_utilizacao", _extract_glp_total_points_from_quantitative_tables(raw_text))
+    add("ramal.primario_diametro", _extract_gas_natural_ramal_diametro(raw_text))
+    add("ramal.primario_material", _extract_gas_natural_ramal_material(raw_text))
+    add("ramal.primario_pavimento", _extract_gas_natural_ramal_pavimento(raw_text))
+    add("valvula.esfera_diametro", _extract_gas_natural_valvula_esfera_diametro(raw_text))
+    add("numero.prancha", _extract_gas_natural_numero_prancha(extraction_result))
+    add("teto_ou_piso", _extract_gas_natural_teto_ou_piso(raw_text))
 
     return MappingResult(context=context, evidence=evidence)
 

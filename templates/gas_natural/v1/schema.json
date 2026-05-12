@@ -137,9 +137,8 @@
       ],
       "properties": {
         "primario_diametro": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Diâmetro do ramal interno primário em mm"
+          "type": "string",
+          "description": "Diâmetro do ramal interno primário preservado como indicado no projeto"
         },
         "primario_material": {
           "type": "string",

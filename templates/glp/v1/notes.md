@@ -94,7 +94,7 @@ Não há seções condicionais identificadas no template GLP v1 atual.
 - abastecimento.qtd_tanques: integer >= 1.
 - dimensionamento.qtd_fogao, dimensionamento.qtd_aquecedor e dimensionamento.qtd_churrasqueira: integer >= 0.
 - soma.qtd_pontos_de_utilizacao: integer >= 0.
-- ramal.primario_diametro: number >= 0.
+- ramal.primario_diametro: string, preservando a notação indicada no projeto.
 - teto_ou_piso: string.
 
 ## Diferenças em relação ao gas_natural v1

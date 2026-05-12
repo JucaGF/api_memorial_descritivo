@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -195,6 +196,46 @@ def _validation_detail_for_type(memorial_type: str) -> str:
     return "Payload invalido para o memorial GLP v1."
 
 
+def _log_validation_failure(
+    request: Request,
+    memorial_type: str,
+    error: MemorialValidationError,
+    event: str,
+) -> None:
+    issues = [
+        {
+            "path": issue.path,
+            "message": issue.message,
+            "validator": issue.validator,
+        }
+        for issue in error.issues
+    ]
+
+    extraction_report_summary: dict[str, Any] | None = None
+    if isinstance(error.extraction_report, dict):
+        extraction_report_summary = {
+            "filled_count": len(error.extraction_report.get("filled", [])),
+            "missing_count": len(error.extraction_report.get("missing", [])),
+            "pending_count": len(error.extraction_report.get("pending", [])),
+        }
+        conflicts = error.extraction_report.get("conflicts")
+        if isinstance(conflicts, list) and conflicts:
+            extraction_report_summary["conflict_count"] = len(conflicts)
+
+    logger.warning(
+        "%s method=%s path=%s request_id=%s memorial_type=%s issues=%s extraction_report=%s",
+        event,
+        request.method,
+        request.url.path,
+        get_request_id(request),
+        memorial_type,
+        json.dumps(issues, ensure_ascii=False),
+        json.dumps(extraction_report_summary, ensure_ascii=False)
+        if extraction_report_summary is not None
+        else "null",
+    )
+
+
 @router.get(
     "/api/v1/memoriais",
     response_model=GeneratedMemorialListResponse,
@@ -330,12 +371,11 @@ async def create_persisted_memorial_from_files(
             observations=observations,
         )
     except MemorialValidationError as error:
-        logger.warning(
-            "Generated memorial validation failed method=%s path=%s request_id=%s memorial_type=%s",
-            request.method,
-            request.url.path,
-            get_request_id(request),
+        _log_validation_failure(
+            request,
             memorial_type,
+            error,
+            "Generated memorial validation failed",
         )
         return _validation_error_response(
             error, _validation_detail_for_type(memorial_type)
@@ -460,6 +500,12 @@ def create_memorial_gas_natural(
         generate_memorial_gas_natural_v1(payload, output_path)
     except MemorialValidationError as error:
         _remove_file(output_path)
+        _log_validation_failure(
+            request,
+            "gas-natural",
+            error,
+            "Memorial render validation failed",
+        )
         return _validation_error_response(
             error, "Payload invalido para o memorial gas natural v1."
         )
@@ -493,6 +539,12 @@ def create_memorial_glp(
         generate_memorial_glp_v1(payload, output_path)
     except MemorialValidationError as error:
         _remove_file(output_path)
+        _log_validation_failure(
+            request,
+            "glp",
+            error,
+            "Memorial render validation failed",
+        )
         return _validation_error_response(
             error, "Payload invalido para o memorial GLP v1."
         )
@@ -703,6 +755,12 @@ async def create_memorial_gas_natural_from_files(
         )
     except MemorialValidationError as error:
         _remove_file(output_path)
+        _log_validation_failure(
+            request,
+            "gas-natural",
+            error,
+            "Memorial render from files validation failed",
+        )
         return _validation_error_response(
             error, "Payload invalido para o memorial gas natural v1."
         )

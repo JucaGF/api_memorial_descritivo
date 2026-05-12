@@ -14,7 +14,7 @@ from app.services.file_ingestion import FileIngestionResult, IngestedFileMetadat
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
 from app.services.pipeline_from_files import (
-    _parse_diameter_mm,
+    _normalize_gas_natural_context,
     _normalize_glp_context,
     _fill_gaps,
     extract_mapping_from_ingested_files,
@@ -437,23 +437,50 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertNotIn("dimensionamento.qtd_fogao", result_mapping.evidence)
         self.assertEqual(result_mapping.context["soma"]["qtd_pontos_de_utilizacao"], 999)
 
-    def test_normalize_glp_context_converts_fractional_inches_to_millimeters(self) -> None:
+    def test_normalize_glp_context_preserves_original_branch_diameter(self) -> None:
         context = {"ramal": {"primario_diametro": '1 1/4"'}}
 
         normalized = _normalize_glp_context(context)
 
-        self.assertEqual(normalized["ramal"]["primario_diametro"], 31.8)
-
-    def test_parse_diameter_mm_rejects_boolean_values(self) -> None:
-        self.assertIsNone(_parse_diameter_mm(True))
-        self.assertIsNone(_parse_diameter_mm(False))
+        self.assertEqual(normalized["ramal"]["primario_diametro"], '1 1/4"')
 
     def test_normalize_glp_context_preserves_already_mm_string_input(self) -> None:
         context = {"ramal": {"primario_diametro": "32 mm"}}
 
         normalized = _normalize_glp_context(context)
 
-        self.assertEqual(normalized["ramal"]["primario_diametro"], 32.0)
+        self.assertEqual(normalized["ramal"]["primario_diametro"], "32 mm")
+
+    def test_normalize_gas_natural_context_normalizes_branch_fields(self) -> None:
+        context = {
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_pavimento": "TERREO",
+            },
+            "teto_ou_piso": "Pelo TETO",
+        }
+
+        normalized = _normalize_gas_natural_context(context)
+
+        self.assertEqual(normalized["ramal"]["primario_diametro"], '1 1/4"')
+        self.assertEqual(normalized["ramal"]["primario_pavimento"], "térreo")
+        self.assertEqual(normalized["teto_ou_piso"], "teto")
+
+    def test_normalize_gas_natural_context_derives_missing_total_from_complete_counts(
+        self,
+    ) -> None:
+        context = {
+            "dimensionamento": {
+                "qtd_fogao": 4,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 1,
+            },
+            "soma": {"qtd_pontos_de_utilizacao": None},
+        }
+
+        normalized = _normalize_gas_natural_context(context)
+
+        self.assertEqual(normalized["soma"]["qtd_pontos_de_utilizacao"], 5)
 
     def test_normalize_glp_context_preserves_total_points_when_dimensionamento_is_incomplete(
         self,
@@ -848,7 +875,7 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
     @patch("app.services.pipeline_from_files.extract_glp_with_llm")
     @patch("app.services.pipeline_from_files.extract_project_files")
-    def test_runs_glp_pipeline_with_ramal_diameter_normalized_to_millimeters(
+    def test_runs_glp_pipeline_preserving_original_ramal_diameter(
         self,
         extract_mock,
         extract_llm_mock,
@@ -882,7 +909,7 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
             generate_memorial_glp_v1_from_ingested_files(ingested_files, output_path)
 
         called_context = generate_mock.call_args.args[0]
-        self.assertEqual(called_context["ramal"]["primario_diametro"], 31.8)
+        self.assertEqual(called_context["ramal"]["primario_diametro"], '1 1/4"')
 
 
 class GenerateFromUploadedFilesTests(unittest.IsolatedAsyncioTestCase):
