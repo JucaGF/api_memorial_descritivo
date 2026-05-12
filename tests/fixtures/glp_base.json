@@ -26,7 +26,7 @@
     "qtd_pontos_de_utilizacao": 64
   },
   "ramal": {
-    "primario_diametro": 32,
+    "primario_diametro": "32 mm",
     "primario_material": "aço carbono",
     "primario_pavimento": "térreo"
   },

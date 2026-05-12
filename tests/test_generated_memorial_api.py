@@ -19,6 +19,7 @@ from app.services.generated_memorial_store import (
     GeneratedMemorialArtifactNotFoundError,
     GeneratedMemorialStorageError,
 )
+from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 
 
 def _memorial(memorial_id: str = "abc-123", memorial_type: str = "telecom") -> GeneratedMemorialResponse:
@@ -121,6 +122,58 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         body = response.body.decode("utf-8")
         self.assertIn("Armazenamento do memorial indisponível.", body)
         self.assertNotIn("/srv/private", body)
+
+    @patch(
+        "app.api.routes.generate_memorial_gas_natural_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_post_persisted_gas_natural_from_files_logs_validation_issues_and_report(
+        self,
+        pipeline_mock,
+    ) -> None:
+        pipeline_mock.side_effect = MemorialValidationError(
+            [
+                ValidationIssue(
+                    path="$.crm",
+                    message="'pavimento' is a required property",
+                    validator="required",
+                ),
+                ValidationIssue(
+                    path="$.ramal.primario_diametro",
+                    message="None is not of type 'number'",
+                    validator="type",
+                ),
+            ],
+            extraction_report={
+                "filled": ["obra.construtora"],
+                "missing": ["obra.nome"],
+                "pending": ["crm.pavimento", "ramal.primario_diametro"],
+            },
+        )
+
+        request = MagicMock()
+        request.state.request_id = "req-gas-123"
+        request.method = "POST"
+        request.url.path = "/api/v1/memoriais/gas-natural/from-files/persist"
+        files = [UploadFile(filename="projeto.pdf", file=BytesIO(b"%PDF-1.4 teste"))]
+
+        with self.assertLogs("app.api.routes", level="WARNING") as captured:
+            response = asyncio.run(
+                routes.create_persisted_memorial_from_files(
+                    "gas-natural",
+                    request,
+                    files,
+                    None,
+                )
+            )
+
+        self.assertIsInstance(response, JSONResponse)
+        self.assertEqual(response.status_code, 400)
+        log_output = "\n".join(captured.output)
+        self.assertIn("$.crm", log_output)
+        self.assertIn("$.ramal.primario_diametro", log_output)
+        self.assertIn("\"missing_count\": 1", log_output)
+        self.assertIn("\"pending_count\": 2", log_output)
 
     @patch("app.api.routes.list_generated_memorials")
     def test_get_memoriais_lists_persisted_memorials(self, list_mock) -> None:

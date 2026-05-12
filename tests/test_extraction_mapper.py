@@ -427,6 +427,49 @@ class GasNaturalExtractionMapperTests(unittest.TestCase):
         self.assertEqual(context["numero_cadastro"], "23/2024")
         self.assertEqual(context["qtd_apartamentos"], 30)
 
+    def test_gas_natural_mapper_extracts_common_schema_fields_from_project_text(self) -> None:
+        raw_text = """
+        PROJETO DE INSTALAÇÕES DE GÁS NATURAL
+        APTO 101 APTO 102 APTO 201 APTO 202
+        CRM localizado no térreo.
+        Ramal interno primário em aço carbono DN 32 mm no térreo pelo teto.
+        Válvula de esfera 32 mm.
+        FOGÃO: 4
+        CHURRASQUEIRA: 1
+        ( 1 PAVIMENTO = 5 PONTOS )
+        """
+        extraction_result = ProjectExtractionResult(
+            raw_text=raw_text,
+            source_files=[
+                ExtractedSourceFile(
+                    original_filename="04_mga_mondo_gas_04_corte_esquematico.pdf",
+                    stored_filename="04_mga_mondo_gas_04_corte_esquematico.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/04_mga_mondo_gas_04_corte_esquematico.pdf",
+                    extracted_text=raw_text,
+                )
+            ],
+            signals={"total_files": 4},
+        )
+
+        result = map_extraction_to_partial_gas_natural_context(extraction_result)
+        context = result.context
+
+        self.assertEqual(context["obra"]["tipo_edificacao"], "Residencial Multifamiliar")
+        self.assertEqual(context["obra"]["qtd_lojas"], 0)
+        self.assertEqual(context["obra"]["qtd_restaurantes"], 0)
+        self.assertEqual(context["crm"]["pavimento"], "térreo")
+        self.assertEqual(context["dimensionamento"]["qtd_fogao"], 4)
+        self.assertEqual(context["dimensionamento"]["qtd_aquecedor"], 0)
+        self.assertEqual(context["dimensionamento"]["qtd_churrasqueira"], 1)
+        self.assertEqual(context["soma"]["qtd_pontos_de_utilizacao"], 5)
+        self.assertEqual(context["ramal"]["primario_diametro"], "32 mm")
+        self.assertEqual(context["ramal"]["primario_material"], "aço carbono")
+        self.assertEqual(context["ramal"]["primario_pavimento"], "térreo")
+        self.assertEqual(context["valvula"]["esfera_diametro"], "32 mm")
+        self.assertEqual(context["numero"]["prancha"], "04/04")
+        self.assertEqual(context["teto_ou_piso"], "teto")
+
 
 if __name__ == "__main__":
     unittest.main()
