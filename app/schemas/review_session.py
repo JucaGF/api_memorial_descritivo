@@ -17,6 +17,7 @@ class ExtractionReportResponse(BaseModel):
     missing: list[str]
     pending: list[str]
     evidence: dict[str, FieldExtractionResponse] = Field(default_factory=dict)
+    cross_validation: dict[str, Any] | None = None
 
 
 class SessionCreatedResponse(BaseModel):

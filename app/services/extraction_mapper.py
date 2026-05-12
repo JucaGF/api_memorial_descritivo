@@ -128,6 +128,7 @@ class ExtractionReport:
     missing: list[str]
     pending: list[str]
     evidence: dict[str, FieldExtraction] = field(default_factory=dict)
+    cross_validation: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -504,6 +505,47 @@ def _extract_telecom_tipologia(text: str) -> FieldExtraction | None:
             confidence="medium",
         )
     return None
+
+
+def _extract_gas_natural_tipologia(
+    text: str,
+    extraction_result: ProjectExtractionResult,
+) -> FieldExtraction | None:
+    text_result = _extract_telecom_tipologia(text)
+    if text_result is not None:
+        return text_result
+
+    filename_text = " ".join(
+        f"{source_file.original_filename} {source_file.stored_filename}"
+        for source_file in extraction_result.source_files
+    )
+    normalized = _ascii_key(filename_text)
+    floors = [
+        int(match.group(1))
+        for match in re.finditer(r"\b(\d+)\s*(?:e\s*)?pav(?:imento|imentos)?\b", normalized)
+    ]
+    if not floors:
+        return None
+
+    parts = []
+    if "subsolo" in normalized:
+        parts.append("Subsolo")
+    if "terreo" in normalized:
+        parts.append("térreo")
+
+    max_floor = max(floors)
+    floor_label = "pavimento" if max_floor == 1 else "pavimentos"
+    parts.append(f"{max_floor} {floor_label}")
+
+    if "cobertura" in normalized or "coberta" in normalized:
+        parts.append("cobertura")
+
+    return FieldExtraction(
+        value=", ".join(parts),
+        evidence=", ".join(source_file.original_filename for source_file in extraction_result.source_files),
+        rule="gas_natural_sheet_filename_typology_inference",
+        confidence="low",
+    )
 
 
 def _extract_telecom_qtd_lojas(text: str) -> FieldExtraction | None:
@@ -1175,7 +1217,7 @@ def map_extraction_to_partial_gas_natural_context(
     add("obra.numero_cadastro", _extract_numero_cadastro(raw_text))
     add("obra.qtd_apartamentos", _extract_qtd_apartamentos(text))
     add("obra.tipo_edificacao", _extract_telecom_tipo_edificacao(text))
-    add("obra.tipologia", _extract_telecom_tipologia(text))
+    add("obra.tipologia", _extract_gas_natural_tipologia(text, extraction_result))
     add("obra.qtd_lojas", _extract_telecom_qtd_lojas(text))
     add("obra.qtd_restaurantes", _extract_telecom_qtd_restaurantes(text))
     add("crm.pavimento", _extract_gas_natural_crm_pavimento(raw_text))
