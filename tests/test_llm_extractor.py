@@ -373,31 +373,180 @@ class ExtractWithLLMTests(unittest.TestCase):
 
     @patch("app.services.llm_extractor._get_client")
     @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
-    def test_multiple_rich_text_files_use_single_combined_extraction(
+    def test_multiple_files_use_batching_and_cross_validation(
         self,
         _model_mock,
         client_mock,
     ) -> None:
-        mock_parsed = LLMExtraction(obra=ObraExtraction(construtora="Combined"))
-        mock_response = MagicMock()
-        mock_response.output_parsed = mock_parsed
+        per_file_responses = []
+        for index in range(12):
+            response = MagicMock()
+            response.output_parsed = LLMExtraction(
+                obra=ObraExtraction(construtora=f"Construtora {index}")
+            )
+            per_file_responses.append(response)
+
+        batch_responses = []
+        for batch_index, value in enumerate(("Lote A", "Lote B", "Lote C")):
+            response = MagicMock()
+            response.output_parsed = LLMExtraction(
+                obra=ObraExtraction(construtora=value)
+            )
+            batch_responses.append(response)
+
+        cross_validation_response = MagicMock()
+        cross_validation_response.output_parsed = LLMExtraction(
+            obra=ObraExtraction(construtora="Lote A"),
+        )
+
         mock_client = MagicMock()
-        mock_client.responses.parse.return_value = mock_response
+        mock_client.responses.parse.side_effect = [
+            *per_file_responses[:5],
+            batch_responses[0],
+            *per_file_responses[5:10],
+            batch_responses[1],
+            *per_file_responses[10:],
+            batch_responses[2],
+            cross_validation_response,
+        ]
+        client_mock.return_value = mock_client
+
+        files = [_source_file(f"{index}.pdf", f"text {index}") for index in range(12)]
+        with patch.dict(
+            os.environ,
+            {
+                "USE_LLM_EXTRACTION": "true",
+                "LLM_EXTRACTION_MAX_CONCURRENCY": "1",
+            },
+        ):
+            result = extract_with_llm(files)
+
+        self.assertEqual(mock_client.responses.parse.call_count, 16)
+        self.assertEqual(result["obra"]["construtora"], "Lote A")
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_batch_size_can_be_overridden_by_env(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        response_a = MagicMock()
+        response_a.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="A"))
+        response_b = MagicMock()
+        response_b.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="B"))
+        response_c = MagicMock()
+        response_c.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="C"))
+        batch_1 = MagicMock()
+        batch_1.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="A"))
+        cross_validation = MagicMock()
+        cross_validation.output_parsed = LLMExtraction(
+            obra=ObraExtraction(construtora="A")
+        )
+
+        mock_client = MagicMock()
+        mock_client.responses.parse.side_effect = [
+            response_a,
+            response_b,
+            batch_1,
+            response_c,
+            cross_validation,
+        ]
+        client_mock.return_value = mock_client
+
+        files = [_source_file("a.pdf"), _source_file("b.pdf"), _source_file("c.pdf")]
+        with patch.dict(
+            os.environ,
+            {
+                "USE_LLM_EXTRACTION": "true",
+                "LLM_EXTRACTION_BATCH_SIZE": "2",
+                "LLM_EXTRACTION_MAX_CONCURRENCY": "1",
+            },
+        ):
+            result = extract_with_llm(files)
+
+        self.assertEqual(mock_client.responses.parse.call_count, 5)
+        self.assertEqual(result["obra"]["construtora"], "A")
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_cross_validation_failure_uses_frequency_fallback(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        response_a = MagicMock()
+        response_a.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="Alpha"))
+        response_b = MagicMock()
+        response_b.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="Alpha"))
+        response_c = MagicMock()
+        response_c.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="Beta"))
+        batch_1 = MagicMock()
+        batch_1.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="Alpha"))
+        mock_client = MagicMock()
+        mock_client.responses.parse.side_effect = [
+            response_a,
+            response_b,
+            batch_1,
+            response_c,
+            RuntimeError("cross validation failed"),
+        ]
+        client_mock.return_value = mock_client
+
+        files = [_source_file("a.pdf"), _source_file("b.pdf"), _source_file("c.pdf")]
+        with patch.dict(
+            os.environ,
+            {
+                "USE_LLM_EXTRACTION": "true",
+                "LLM_EXTRACTION_BATCH_SIZE": "2",
+                "LLM_EXTRACTION_MAX_CONCURRENCY": "1",
+            },
+        ):
+            result = extract_with_llm(files)
+
+        self.assertEqual(result["obra"]["construtora"], "Alpha")
+        self.assertNotIn("observacoes", result)
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_multiple_rich_text_files_use_batched_extraction_and_cross_validation(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        response_a = MagicMock()
+        response_a.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="A"))
+        response_b = MagicMock()
+        response_b.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="B"))
+        batch_response = MagicMock()
+        batch_response.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="A"))
+        cross_validation = MagicMock()
+        cross_validation.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="A"))
+        mock_client = MagicMock()
+        mock_client.responses.parse.side_effect = [
+            response_a,
+            response_b,
+            batch_response,
+            cross_validation,
+        ]
         client_mock.return_value = mock_client
 
         files = [
             _source_file("a.pdf", "EL " * 2000, ["data:image/png;base64,AAA"]),
             _source_file("b.pdf", "EL " * 2000, ["data:image/png;base64,BBB"]),
         ]
-        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+        with patch.dict(
+            os.environ,
+            {"USE_LLM_EXTRACTION": "true", "LLM_EXTRACTION_MAX_CONCURRENCY": "1"},
+        ):
             result = extract_with_llm(files)
 
-        kwargs = mock_client.responses.parse.call_args.kwargs
-        content = kwargs["input"][0]["content"]
-        self.assertEqual(mock_client.responses.parse.call_count, 1)
-        self.assertFalse(any(part.get("type") == "input_image" for part in content))
-        self.assertNotIn("reasoning", kwargs)
-        self.assertEqual(result["obra"]["construtora"], "Combined")
+        first_kwargs = mock_client.responses.parse.call_args_list[0].kwargs
+        content = first_kwargs["input"][0]["content"]
+        self.assertEqual(mock_client.responses.parse.call_count, 3)
+        self.assertTrue(any(part.get("type") == "input_image" for part in content))
+        self.assertEqual(first_kwargs["reasoning"], {"effort": "high"})
+        self.assertEqual(result["obra"]["construtora"], "A")
 
     @patch("app.services.llm_extractor._get_client")
     @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
@@ -473,31 +622,44 @@ class ExtractWithLLMTests(unittest.TestCase):
 
     @patch("app.services.llm_extractor._get_client")
     @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
-    def test_telecom_multiple_rich_text_files_use_single_combined_extraction(
+    def test_telecom_multiple_rich_text_files_use_batched_extraction_and_cross_validation(
         self,
         _model_mock,
         client_mock,
     ) -> None:
-        mock_parsed = TelecomLLMExtraction(obra=ObraExtraction(construtora="Telecom Combined"))
-        mock_response = MagicMock()
-        mock_response.output_parsed = mock_parsed
+        response_a = MagicMock()
+        response_a.output_parsed = TelecomLLMExtraction(obra=ObraExtraction(construtora="Telecom A"))
+        response_b = MagicMock()
+        response_b.output_parsed = TelecomLLMExtraction(obra=ObraExtraction(construtora="Telecom B"))
+        batch_response = MagicMock()
+        batch_response.output_parsed = TelecomLLMExtraction(obra=ObraExtraction(construtora="Telecom A"))
+        cross_validation = MagicMock()
+        cross_validation.output_parsed = TelecomLLMExtraction(obra=ObraExtraction(construtora="Telecom A"))
         mock_client = MagicMock()
-        mock_client.responses.parse.return_value = mock_response
+        mock_client.responses.parse.side_effect = [
+            response_a,
+            response_b,
+            batch_response,
+            cross_validation,
+        ]
         client_mock.return_value = mock_client
 
         files = [
             _source_file("a.pdf", "TELECOM " * 1000, ["data:image/png;base64,AAA"]),
             _source_file("b.pdf", "TELECOM " * 1000, ["data:image/png;base64,BBB"]),
         ]
-        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+        with patch.dict(
+            os.environ,
+            {"USE_LLM_EXTRACTION": "true", "LLM_EXTRACTION_MAX_CONCURRENCY": "1"},
+        ):
             result = extract_telecom_with_llm(files)
 
-        kwargs = mock_client.responses.parse.call_args.kwargs
-        content = kwargs["input"][0]["content"]
-        self.assertEqual(mock_client.responses.parse.call_count, 1)
-        self.assertFalse(any(part.get("type") == "input_image" for part in content))
-        self.assertNotIn("reasoning", kwargs)
-        self.assertEqual(result["obra"]["construtora"], "Telecom Combined")
+        first_kwargs = mock_client.responses.parse.call_args_list[0].kwargs
+        content = first_kwargs["input"][0]["content"]
+        self.assertEqual(mock_client.responses.parse.call_count, 3)
+        self.assertTrue(any(part.get("type") == "input_image" for part in content))
+        self.assertEqual(first_kwargs["reasoning"], {"effort": "high"})
+        self.assertEqual(result["obra"]["construtora"], "Telecom A")
 
     def test_extract_gas_natural_returns_empty_when_disabled(self) -> None:
         with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
@@ -558,31 +720,44 @@ class ExtractWithLLMTests(unittest.TestCase):
 
     @patch("app.services.llm_extractor._get_client")
     @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
-    def test_gas_natural_multiple_rich_text_only_files_use_single_combined_extraction(
+    def test_gas_natural_multiple_rich_text_only_files_use_batched_extraction_and_cross_validation(
         self,
         _model_mock,
         client_mock,
     ) -> None:
-        mock_parsed = GasNaturalLLMExtraction(obra=ObraExtraction(construtora="Gas Combined"))
-        mock_response = MagicMock()
-        mock_response.output_parsed = mock_parsed
+        response_a = MagicMock()
+        response_a.output_parsed = GasNaturalLLMExtraction(obra=ObraExtraction(construtora="Gas A"))
+        response_b = MagicMock()
+        response_b.output_parsed = GasNaturalLLMExtraction(obra=ObraExtraction(construtora="Gas B"))
+        batch_response = MagicMock()
+        batch_response.output_parsed = GasNaturalLLMExtraction(obra=ObraExtraction(construtora="Gas A"))
+        cross_validation = MagicMock()
+        cross_validation.output_parsed = GasNaturalLLMExtraction(obra=ObraExtraction(construtora="Gas A"))
         mock_client = MagicMock()
-        mock_client.responses.parse.return_value = mock_response
+        mock_client.responses.parse.side_effect = [
+            response_a,
+            response_b,
+            batch_response,
+            cross_validation,
+        ]
         client_mock.return_value = mock_client
 
         files = [
             _source_file("a.pdf", "GAS " * 2000),
             _source_file("b.pdf", "GAS " * 2000),
         ]
-        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+        with patch.dict(
+            os.environ,
+            {"USE_LLM_EXTRACTION": "true", "LLM_EXTRACTION_MAX_CONCURRENCY": "1"},
+        ):
             result = extract_gas_natural_with_llm(files)
 
-        kwargs = mock_client.responses.parse.call_args.kwargs
-        content = kwargs["input"][0]["content"]
-        self.assertEqual(mock_client.responses.parse.call_count, 1)
+        first_kwargs = mock_client.responses.parse.call_args_list[0].kwargs
+        content = first_kwargs["input"][0]["content"]
+        self.assertEqual(mock_client.responses.parse.call_count, 3)
         self.assertFalse(any(part.get("type") == "input_image" for part in content))
-        self.assertNotIn("reasoning", kwargs)
-        self.assertEqual(result["obra"]["construtora"], "Gas Combined")
+        self.assertNotIn("reasoning", first_kwargs)
+        self.assertEqual(result["obra"]["construtora"], "Gas A")
 
     @patch("app.services.llm_extractor._get_client")
     @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
@@ -674,27 +849,40 @@ class ExtractWithLLMTests(unittest.TestCase):
 
     @patch("app.services.llm_extractor._get_client")
     @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
-    def test_glp_multiple_rich_text_files_use_single_combined_extraction(
+    def test_glp_multiple_rich_text_files_use_batched_extraction_and_cross_validation(
         self,
         _model_mock,
         client_mock,
     ) -> None:
-        mock_parsed = GlpLLMExtraction(obra=ObraExtraction(construtora="GLP Combined"))
-        mock_response = MagicMock()
-        mock_response.output_parsed = mock_parsed
+        response_a = MagicMock()
+        response_a.output_parsed = GlpLLMExtraction(obra=ObraExtraction(construtora="GLP A"))
+        response_b = MagicMock()
+        response_b.output_parsed = GlpLLMExtraction(obra=ObraExtraction(construtora="GLP B"))
+        batch_response = MagicMock()
+        batch_response.output_parsed = GlpLLMExtraction(obra=ObraExtraction(construtora="GLP A"))
+        cross_validation = MagicMock()
+        cross_validation.output_parsed = GlpLLMExtraction(obra=ObraExtraction(construtora="GLP A"))
         mock_client = MagicMock()
-        mock_client.responses.parse.return_value = mock_response
+        mock_client.responses.parse.side_effect = [
+            response_a,
+            response_b,
+            batch_response,
+            cross_validation,
+        ]
         client_mock.return_value = mock_client
 
         files = [
             _source_file("a.pdf", "GLP " * 1000, ["data:image/png;base64,AAA"]),
             _source_file("b.pdf", "GLP " * 1000, ["data:image/png;base64,BBB"]),
         ]
-        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+        with patch.dict(
+            os.environ,
+            {"USE_LLM_EXTRACTION": "true", "LLM_EXTRACTION_MAX_CONCURRENCY": "1"},
+        ):
             result = extract_glp_with_llm(files)
 
-        self.assertEqual(mock_client.responses.parse.call_count, 1)
-        self.assertEqual(result["obra"]["construtora"], "GLP Combined")
+        self.assertEqual(mock_client.responses.parse.call_count, 3)
+        self.assertEqual(result["obra"]["construtora"], "GLP A")
 
 
 if __name__ == "__main__":

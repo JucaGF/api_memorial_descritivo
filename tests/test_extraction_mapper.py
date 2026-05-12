@@ -427,6 +427,46 @@ class GasNaturalExtractionMapperTests(unittest.TestCase):
         self.assertEqual(context["numero_cadastro"], "23/2024")
         self.assertEqual(context["qtd_apartamentos"], 30)
 
+    def test_gas_natural_mapper_derives_typology_from_sheet_filenames(self) -> None:
+        extraction_result = ProjectExtractionResult(
+            raw_text="PROJETO DE INSTALAÇÕES DE GÁS NATURAL",
+            source_files=[
+                ExtractedSourceFile(
+                    original_filename="01_mga_mondo_g_s_01_subsolo_ao_3_pav_18_07_2023.pdf",
+                    stored_filename="01_mga_mondo_g_s_01_subsolo_ao_3_pav_18_07_2023.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/01_mga_mondo_g_s_01_subsolo_ao_3_pav_18_07_2023.pdf",
+                    extracted_text="",
+                ),
+                ExtractedSourceFile(
+                    original_filename="02_mga_mondo_g_s_02_4_e_5_pav_18_07_2023.pdf",
+                    stored_filename="02_mga_mondo_g_s_02_4_e_5_pav_18_07_2023.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/02_mga_mondo_g_s_02_4_e_5_pav_18_07_2023.pdf",
+                    extracted_text="",
+                ),
+                ExtractedSourceFile(
+                    original_filename="03_mga_mondo_g_s_03_6_pav_e_cobertura_18_07_2023.pdf",
+                    stored_filename="03_mga_mondo_g_s_03_6_pav_e_cobertura_18_07_2023.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/03_mga_mondo_g_s_03_6_pav_e_cobertura_18_07_2023.pdf",
+                    extracted_text="",
+                ),
+            ],
+            signals={"total_files": 3},
+        )
+
+        result = map_extraction_to_partial_gas_natural_context(extraction_result)
+
+        self.assertEqual(
+            result.context["obra"]["tipologia"],
+            "Subsolo, 6 pavimentos, cobertura",
+        )
+        self.assertEqual(
+            result.evidence["obra.tipologia"].rule,
+            "gas_natural_sheet_filename_typology_inference",
+        )
+
     def test_gas_natural_mapper_extracts_common_schema_fields_from_project_text(self) -> None:
         raw_text = """
         PROJETO DE INSTALAÇÕES DE GÁS NATURAL

@@ -4,6 +4,9 @@ import json
 import logging
 import os
 import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
@@ -13,6 +16,36 @@ from app.services.project_extractor import ExtractedSourceFile
 logger = logging.getLogger(__name__)
 RICH_TEXT_ONLY_THRESHOLD = 4000
 GLP_TEXT_ONLY_THRESHOLD = RICH_TEXT_ONLY_THRESHOLD
+
+
+@dataclass(frozen=True)
+class LLMExtractionRunResult:
+    context: dict[str, Any]
+    cross_validation: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class BatchFileExtractionResult:
+    filename: str
+    extraction_type: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BatchExtractionResult:
+    batch_index: int
+    files: list[str]
+    per_file_results: list[BatchFileExtractionResult]
+    merged_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ExtractionStrategy:
+    name: str
+    cross_validation_intro: str
+    text_format: type[BaseModel]
+    single_file_extractor: Any
+    batch_merger: Any
 
 
 # ── Extraction schema ─────────────────────────────────────────────────────────
@@ -458,6 +491,20 @@ Rules:
 Per-file extractions:
 """
 
+GENERIC_CROSS_VALIDATION_PROMPT = """\
+You are performing cross-validation for structured memorial extraction candidates from the SAME project.
+
+Rules:
+- Choose values ONLY from the provided candidates. Never invent or rewrite a value.
+- Repeated identical values across files are stronger evidence, not an error.
+- Prefer candidates with higher occurrence_count when the evidence is otherwise equivalent.
+- Use source_files, extraction_type, and batch_index as supporting evidence.
+- If no candidate is reliable for a field, leave it null.
+- Ignore `observacoes` and do not add it to the final output.
+
+Candidate groups by field:
+"""
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -687,10 +734,9 @@ def _build_glp_merge_input(
 
 def _count_non_null_fields(extraction: dict[str, Any]) -> int:
     return sum(
-        1 for section in extraction.values()
-        if isinstance(section, dict)
-        for v in section.values()
-        if v is not None
+        1
+        for _field_path, value in _iter_non_null_fields(extraction)
+        if value is not None
     )
 
 
@@ -774,29 +820,6 @@ def _has_rich_text(source_file: ExtractedSourceFile) -> bool:
         bool(source_file.extracted_text.strip())
         and len(source_file.extracted_text) >= RICH_TEXT_ONLY_THRESHOLD
     )
-
-
-def _should_use_combined_text_extraction(
-    source_files: list[ExtractedSourceFile],
-) -> bool:
-    return len(source_files) > 1 and all(_has_rich_text(sf) for sf in source_files)
-
-
-def _extract_combined_text(
-    client: Any,
-    model: str,
-    source_files: list[ExtractedSourceFile],
-    prompt: str,
-    text_format: type[BaseModel],
-) -> dict[str, Any]:
-    response = client.responses.parse(
-        model=model,
-        input=_build_combined_text_input(source_files, prompt),
-        text_format=text_format,
-    )
-    if response.output_parsed is None:
-        return {}
-    return response.output_parsed.model_dump(mode="json")
 
 
 def _merge_with_llm(
@@ -902,6 +925,410 @@ def _merge_glp_with_llm(
     return response.output_parsed.model_dump(mode="json")
 
 
+def _cross_validate_with_llm(
+    client: Any,
+    model: str,
+    strategy: ExtractionStrategy,
+    candidate_groups: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    response = client.responses.parse(
+        model=model,
+        input=_build_cross_validation_input(strategy, candidate_groups),
+        text_format=strategy.text_format,
+    )
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _get_positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r, using default=%d", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Non-positive integer for %s=%r, using default=%d", name, raw, default)
+        return default
+    return value
+
+
+def _get_batch_size() -> int:
+    return _get_positive_int_env("LLM_EXTRACTION_BATCH_SIZE", 5)
+
+
+def _get_max_concurrency() -> int:
+    return _get_positive_int_env("LLM_EXTRACTION_MAX_CONCURRENCY", 5)
+
+
+def _chunk_source_files(
+    source_files: list[ExtractedSourceFile],
+    batch_size: int,
+) -> list[list[ExtractedSourceFile]]:
+    return [
+        source_files[index:index + batch_size]
+        for index in range(0, len(source_files), batch_size)
+    ]
+
+
+def _iter_non_null_fields(
+    payload: dict[str, Any],
+    prefix: str = "",
+):
+    for key, value in payload.items():
+        if key == "observacoes":
+            continue
+        field_path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            yield from _iter_non_null_fields(value, field_path)
+            continue
+        if value is not None:
+            yield field_path, value
+
+
+def _set_field_value(context: dict[str, Any], field_path: str, value: Any) -> None:
+    parts = field_path.split(".")
+    cursor = context
+    for part in parts[:-1]:
+        next_cursor = cursor.get(part)
+        if not isinstance(next_cursor, dict):
+            next_cursor = {}
+            cursor[part] = next_cursor
+        cursor = next_cursor
+    cursor[parts[-1]] = value
+
+
+def _get_field_value(context: dict[str, Any], field_path: str) -> Any:
+    parts = field_path.split(".")
+    cursor: Any = context
+    for part in parts:
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(part)
+    return cursor
+
+
+def _stable_value_key(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _build_cross_validation_input(
+    strategy: ExtractionStrategy,
+    candidate_groups: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    sections = []
+    for field_path, candidates in sorted(candidate_groups.items()):
+        sections.append(
+            f"=== {field_path} ===\n{json.dumps(candidates, ensure_ascii=False, indent=2)}"
+        )
+    prompt = (
+        GENERIC_CROSS_VALIDATION_PROMPT
+        + "\n"
+        + strategy.cross_validation_intro.strip()
+        + "\n\n"
+        + "\n\n".join(sections)
+    )
+    return [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]
+
+
+def _extract_file_with_metadata(
+    strategy: ExtractionStrategy,
+    client: Any,
+    model: str,
+    source_file: ExtractedSourceFile,
+) -> BatchFileExtractionResult:
+    payload = strategy.single_file_extractor(client, model, source_file)
+    extraction_type = "vision" if source_file.page_images and not _has_rich_text(source_file) else "text"
+    return BatchFileExtractionResult(
+        filename=source_file.original_filename,
+        extraction_type=extraction_type,
+        payload=payload,
+    )
+
+
+def _extract_batch(
+    strategy: ExtractionStrategy,
+    client: Any,
+    model: str,
+    batch_index: int,
+    source_files: list[ExtractedSourceFile],
+    max_concurrency: int,
+) -> BatchExtractionResult:
+    per_file_results: list[BatchFileExtractionResult] = []
+    with ThreadPoolExecutor(max_workers=min(max_concurrency, len(source_files))) as executor:
+        futures = [
+            executor.submit(_extract_file_with_metadata, strategy, client, model, source_file)
+            for source_file in source_files
+        ]
+        for future in futures:
+            result = future.result()
+            if result.payload:
+                per_file_results.append(result)
+
+    if not per_file_results:
+        return BatchExtractionResult(
+            batch_index=batch_index,
+            files=[source_file.original_filename for source_file in source_files],
+            per_file_results=[],
+            merged_payload={},
+        )
+
+    if len(per_file_results) == 1:
+        merged_payload = per_file_results[0].payload
+    else:
+        merged_payload = strategy.batch_merger(
+            client,
+            model,
+            [(result.filename, result.payload) for result in per_file_results],
+        )
+
+    return BatchExtractionResult(
+        batch_index=batch_index,
+        files=[source_file.original_filename for source_file in source_files],
+        per_file_results=per_file_results,
+        merged_payload=merged_payload,
+    )
+
+
+def _build_candidate_groups(
+    batch_results: list[BatchExtractionResult],
+) -> tuple[dict[str, list[dict[str, Any]]], int]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    total_candidates = 0
+
+    for batch in batch_results:
+        supporting_values: dict[str, dict[str, list[BatchFileExtractionResult]]] = defaultdict(lambda: defaultdict(list))
+        for per_file in batch.per_file_results:
+            for field_path, value in _iter_non_null_fields(per_file.payload):
+                supporting_values[field_path][_stable_value_key(value)].append(per_file)
+
+        for field_path, value in _iter_non_null_fields(batch.merged_payload):
+            value_key = _stable_value_key(value)
+            supporting_files = supporting_values.get(field_path, {}).get(value_key, [])
+            grouped[field_path].append({
+                "value": value,
+                "source_files": [item.filename for item in supporting_files] or batch.files,
+                "batch_index": batch.batch_index,
+                "extraction_type": (
+                    "vision"
+                    if any(item.extraction_type == "vision" for item in supporting_files)
+                    else "text"
+                ),
+                "occurrence_count": len(supporting_files) or 1,
+            })
+            total_candidates += 1
+
+    for field_path, candidates in grouped.items():
+        occurrences: dict[str, int] = defaultdict(int)
+        for candidate in candidates:
+            occurrences[_stable_value_key(candidate["value"])] += int(candidate["occurrence_count"])
+        for candidate in candidates:
+            candidate["occurrence_count"] = occurrences[_stable_value_key(candidate["value"])]
+
+    return dict(grouped), total_candidates
+
+
+def _apply_validated_selection(
+    candidate_groups: dict[str, list[dict[str, Any]]],
+    validated_context: dict[str, Any],
+) -> tuple[dict[str, Any], set[str]]:
+    context: dict[str, Any] = {}
+    resolved_fields: set[str] = set()
+
+    for field_path, candidates in candidate_groups.items():
+        selected_value = _get_field_value(validated_context, field_path)
+        if selected_value is None:
+            continue
+        candidate_values = {_stable_value_key(candidate["value"]) for candidate in candidates}
+        if _stable_value_key(selected_value) not in candidate_values:
+            logger.warning("Ignoring cross-validation value not present in candidates: %s", field_path)
+            continue
+        _set_field_value(context, field_path, selected_value)
+        resolved_fields.add(field_path)
+
+    return context, resolved_fields
+
+
+def _deterministic_fallback_from_candidates(
+    candidate_groups: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, Any], list[dict[str, Any]], set[str]]:
+    context: dict[str, Any] = {}
+    conflicts: list[dict[str, Any]] = []
+    resolved_fields: set[str] = set()
+
+    for field_path, candidates in candidate_groups.items():
+        if not candidates:
+            continue
+        grouped_by_value: dict[str, dict[str, Any]] = {}
+        for candidate in candidates:
+            key = _stable_value_key(candidate["value"])
+            current = grouped_by_value.get(key)
+            if current is None or candidate["occurrence_count"] > current["occurrence_count"]:
+                grouped_by_value[key] = candidate
+
+        ordered = sorted(
+            grouped_by_value.values(),
+            key=lambda item: (-int(item["occurrence_count"]), item["batch_index"]),
+        )
+        if len(ordered) == 1:
+            winner = ordered[0]
+            _set_field_value(context, field_path, winner["value"])
+            resolved_fields.add(field_path)
+            continue
+
+        top = ordered[0]
+        second = ordered[1]
+        if int(top["occurrence_count"]) > int(second["occurrence_count"]):
+            _set_field_value(context, field_path, top["value"])
+            resolved_fields.add(field_path)
+            conflicts.append({
+                "field_path": field_path,
+                "status": "resolved_by_frequency",
+                "selected_value": top["value"],
+                "candidates": ordered,
+            })
+            continue
+
+        conflicts.append({
+            "field_path": field_path,
+            "status": "unresolved",
+            "selected_value": None,
+            "candidates": ordered,
+        })
+
+    return context, conflicts, resolved_fields
+
+
+def _build_cross_validation_summary(
+    batch_size: int,
+    batch_count: int,
+    candidate_count: int,
+    resolved_fields: set[str],
+    conflicts: list[dict[str, Any]],
+    fallback_used: bool,
+) -> dict[str, Any]:
+    return {
+        "batch_size": batch_size,
+        "batch_count": batch_count,
+        "candidate_count": candidate_count,
+        "resolved_fields": sorted(resolved_fields),
+        "conflicts": conflicts,
+        "fallback_used": fallback_used,
+    }
+
+
+def _run_llm_extraction(
+    source_files: list[ExtractedSourceFile],
+    strategy: ExtractionStrategy,
+) -> LLMExtractionRunResult:
+    usable_files = [
+        source_file
+        for source_file in source_files
+        if source_file.extracted_text.strip() or source_file.page_images
+    ]
+    if not usable_files:
+        logger.info("No extractable content in %s source files, skipping LLM", strategy.name)
+        return LLMExtractionRunResult(context={})
+
+    client = _get_client()
+    model = _get_model()
+    batch_size = _get_batch_size()
+    max_concurrency = _get_max_concurrency()
+    batches = _chunk_source_files(usable_files, batch_size)
+    logger.info(
+        "%s LLM extraction: model=%s, files=%d, batches=%d, batch_size=%d, concurrency=%d",
+        strategy.name,
+        model,
+        len(usable_files),
+        len(batches),
+        batch_size,
+        max_concurrency,
+    )
+
+    t0 = time.monotonic()
+    batch_results: list[BatchExtractionResult] = []
+    for batch_index, batch in enumerate(batches):
+        batch_result = _extract_batch(
+            strategy,
+            client,
+            model,
+            batch_index,
+            batch,
+            max_concurrency,
+        )
+        batch_results.append(batch_result)
+        logger.info(
+            "  %s batch %d/%d: files=%d, fields=%d",
+            strategy.name,
+            batch_index + 1,
+            len(batches),
+            len(batch),
+            _count_non_null_fields(batch_result.merged_payload),
+        )
+
+    non_empty_batches = [batch for batch in batch_results if batch.merged_payload]
+    if not non_empty_batches:
+        logger.warning("%s LLM extraction returned no results from any batch", strategy.name)
+        return LLMExtractionRunResult(context={})
+
+    candidate_groups, candidate_count = _build_candidate_groups(non_empty_batches)
+    fallback_used = False
+    conflicts: list[dict[str, Any]] = []
+    resolved_fields: set[str] = set()
+
+    if len(non_empty_batches) == 1:
+        final_context = non_empty_batches[0].merged_payload
+        resolved_fields = {field_path for field_path, _ in _iter_non_null_fields(final_context)}
+    else:
+        try:
+            validated_context = _cross_validate_with_llm(
+                client,
+                model,
+                strategy,
+                candidate_groups,
+            )
+            final_context, resolved_fields = _apply_validated_selection(
+                candidate_groups,
+                validated_context,
+            )
+        except Exception:
+            logger.exception("%s cross-validation failed; applying deterministic fallback", strategy.name)
+            final_context = {}
+
+        fallback_context, conflicts, fallback_resolved = _deterministic_fallback_from_candidates(
+            candidate_groups
+        )
+        for field_path, value in _iter_non_null_fields(fallback_context):
+            if _get_field_value(final_context, field_path) is None:
+                _set_field_value(final_context, field_path, value)
+        if conflicts or fallback_resolved - resolved_fields:
+            fallback_used = True
+        resolved_fields |= fallback_resolved
+
+    final_context.pop("observacoes", None)
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "%s LLM extraction complete: fields=%d, elapsed=%.1fs",
+        strategy.name,
+        _count_non_null_fields(final_context),
+        elapsed,
+    )
+    return LLMExtractionRunResult(
+        context=final_context,
+        cross_validation=_build_cross_validation_summary(
+            batch_size=batch_size,
+            batch_count=len(batches),
+            candidate_count=candidate_count,
+            resolved_fields=resolved_fields,
+            conflicts=conflicts,
+            fallback_used=fallback_used,
+        ),
+    )
+
+
 def _first_non_null_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
     """Simple deterministic fallback: first non-null value wins per field."""
     merged: dict[str, Any] = {}
@@ -919,269 +1346,103 @@ def _first_non_null_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def extract_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
-    """Vision-first extraction: send page images + text to GPT for structured extraction."""
+ELETRICO_STRATEGY = ExtractionStrategy(
+    name="Eletrico",
+    cross_validation_intro=(
+        "Return the final electrical memorial extraction using only candidate values. "
+        "Prefer title block evidence for obra, single-line diagrams for energia/mt, grounding "
+        "details for aterramento, and dedicated panels or legends for nao_inclusos."
+    ),
+    text_format=LLMExtraction,
+    single_file_extractor=_extract_single_file,
+    batch_merger=_merge_with_llm,
+)
+
+TELECOM_STRATEGY = ExtractionStrategy(
+    name="Telecom",
+    cross_validation_intro=(
+        "Return the final telecom memorial extraction using only candidate values. "
+        "Prefer cover sheets, title blocks, and general notes when project metadata conflicts."
+    ),
+    text_format=TelecomLLMExtraction,
+    single_file_extractor=_extract_telecom_single_file,
+    batch_merger=_merge_telecom_with_llm,
+)
+
+GAS_NATURAL_STRATEGY = ExtractionStrategy(
+    name="Gas natural",
+    cross_validation_intro=(
+        "Return the final natural gas memorial extraction using only candidate values. "
+        "Prefer title blocks for obra, appliance tables for dimensionamento/soma, and line "
+        "details for ramal, valvula, numero, and teto_ou_piso."
+    ),
+    text_format=GasNaturalLLMExtraction,
+    single_file_extractor=_extract_gas_natural_single_file,
+    batch_merger=_merge_gas_natural_with_llm,
+)
+
+GLP_STRATEGY = ExtractionStrategy(
+    name="GLP",
+    cross_validation_intro=(
+        "Return the final GLP memorial extraction using only candidate values. "
+        "Prefer title blocks for obra, tank-area drawings for abastecimento, appliance tables "
+        "for dimensionamento/soma, and line details for ramal, numero, and teto_ou_piso."
+    ),
+    text_format=GlpLLMExtraction,
+    single_file_extractor=_extract_glp_single_file,
+    batch_merger=_merge_glp_with_llm,
+)
+
+
+def extract_with_llm_result(source_files: list[ExtractedSourceFile]) -> LLMExtractionRunResult:
     if not is_llm_extraction_enabled():
         logger.debug("LLM extraction disabled, skipping")
-        return {}
+        return LLMExtractionRunResult(context={})
+    return _run_llm_extraction(source_files, ELETRICO_STRATEGY)
 
-    usable_files = [
-        sf for sf in source_files
-        if sf.extracted_text.strip() or sf.page_images
-    ]
-    if not usable_files:
-        logger.info("No extractable content in source files, skipping LLM")
-        return {}
 
-    client = _get_client()
-    model = _get_model()
-    logger.info(
-        "LLM vision extraction: model=%s, files=%d",
-        model, len(usable_files),
-    )
+def extract_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
+    """Vision-first extraction: send page images + text to GPT for structured extraction."""
+    return extract_with_llm_result(source_files).context
 
-    t0 = time.monotonic()
-    if _should_use_combined_text_extraction(usable_files):
-        logger.info("Using single combined text extraction for %d files", len(usable_files))
-        merged = _extract_combined_text(
-            client,
-            model,
-            usable_files,
-            EXTRACTION_PROMPT,
-            LLMExtraction,
-        )
-        merged.pop("observacoes", None)
-        elapsed = time.monotonic() - t0
-        logger.info(
-            "Combined text extraction complete: fields=%d, elapsed=%.1fs",
-            _count_non_null_fields(merged),
-            elapsed,
-        )
-        return merged
 
-    per_file_results: list[tuple[str, dict[str, Any]]] = []
-
-    for sf in usable_files:
-        result = _extract_single_file(client, model, sf)
-        if result:
-            per_file_results.append((sf.original_filename, result))
-            logger.info("  %s: %d fields extracted", sf.original_filename, _count_non_null_fields(result))
-
-    if not per_file_results:
-        logger.warning("LLM extraction returned no results from any file")
-        return {}
-
-    if len(per_file_results) == 1:
-        merged = per_file_results[0][1]
-    else:
-        logger.info("Merging %d per-file extractions with LLM", len(per_file_results))
-        merged = _merge_with_llm(client, model, per_file_results)
-
-    merged.pop("observacoes", None)
-    elapsed = time.monotonic() - t0
-    logger.info("LLM extraction complete: fields=%d, elapsed=%.1fs", _count_non_null_fields(merged), elapsed)
-
-    return merged
+def extract_telecom_with_llm_result(
+    source_files: list[ExtractedSourceFile],
+) -> LLMExtractionRunResult:
+    if not is_llm_extraction_enabled():
+        logger.debug("Telecom LLM extraction disabled, skipping")
+        return LLMExtractionRunResult(context={})
+    return _run_llm_extraction(source_files, TELECOM_STRATEGY)
 
 
 def extract_telecom_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
     """Vision-first extraction for telecom memorial fields only."""
+    return extract_telecom_with_llm_result(source_files).context
+
+
+def extract_gas_natural_with_llm_result(
+    source_files: list[ExtractedSourceFile],
+) -> LLMExtractionRunResult:
     if not is_llm_extraction_enabled():
-        logger.debug("Telecom LLM extraction disabled, skipping")
-        return {}
-
-    usable_files = [
-        sf for sf in source_files
-        if sf.extracted_text.strip() or sf.page_images
-    ]
-    if not usable_files:
-        logger.info("No extractable content in telecom source files, skipping LLM")
-        return {}
-
-    client = _get_client()
-    model = _get_model()
-    logger.info(
-        "Telecom LLM vision extraction: model=%s, files=%d",
-        model, len(usable_files),
-    )
-
-    t0 = time.monotonic()
-    if _should_use_combined_text_extraction(usable_files):
-        logger.info("Using single combined telecom text extraction for %d files", len(usable_files))
-        merged = _extract_combined_text(
-            client,
-            model,
-            usable_files,
-            TELECOM_EXTRACTION_PROMPT,
-            TelecomLLMExtraction,
-        )
-        merged.pop("observacoes", None)
-        elapsed = time.monotonic() - t0
-        logger.info(
-            "Telecom combined text extraction complete: fields=%d, elapsed=%.1fs",
-            _count_non_null_fields(merged),
-            elapsed,
-        )
-        return merged
-
-    per_file_results: list[tuple[str, dict[str, Any]]] = []
-
-    for sf in usable_files:
-        result = _extract_telecom_single_file(client, model, sf)
-        if result:
-            per_file_results.append((sf.original_filename, result))
-            logger.info(
-                "  telecom %s: %d fields extracted",
-                sf.original_filename,
-                _count_non_null_fields(result),
-            )
-
-    if not per_file_results:
-        logger.warning("Telecom LLM extraction returned no results from any file")
-        return {}
-
-    if len(per_file_results) == 1:
-        merged = per_file_results[0][1]
-    else:
-        logger.info("Merging %d telecom per-file extractions with LLM", len(per_file_results))
-        merged = _merge_telecom_with_llm(client, model, per_file_results)
-
-    merged.pop("observacoes", None)
-    elapsed = time.monotonic() - t0
-    logger.info(
-        "Telecom LLM extraction complete: fields=%d, elapsed=%.1fs",
-        _count_non_null_fields(merged),
-        elapsed,
-    )
-
-    return merged
+        logger.debug("Gas natural LLM extraction disabled, skipping")
+        return LLMExtractionRunResult(context={})
+    return _run_llm_extraction(source_files, GAS_NATURAL_STRATEGY)
 
 
 def extract_gas_natural_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
     """Vision-first extraction for gas natural memorial fields only."""
+    return extract_gas_natural_with_llm_result(source_files).context
+
+
+def extract_glp_with_llm_result(
+    source_files: list[ExtractedSourceFile],
+) -> LLMExtractionRunResult:
     if not is_llm_extraction_enabled():
-        logger.debug("Gas natural LLM extraction disabled, skipping")
-        return {}
-
-    usable_files = [
-        sf for sf in source_files
-        if sf.extracted_text.strip() or sf.page_images
-    ]
-    if not usable_files:
-        logger.info("No extractable content in gas natural source files, skipping LLM")
-        return {}
-
-    client = _get_client()
-    model = _get_model()
-    logger.info(
-        "Gas natural LLM vision extraction: model=%s, files=%d",
-        model, len(usable_files),
-    )
-
-    t0 = time.monotonic()
-    if _should_use_combined_text_extraction(usable_files) and not any(
-        sf.page_images for sf in usable_files
-    ):
-        logger.info("Using single combined gas natural text extraction for %d files", len(usable_files))
-        merged = _extract_combined_text(
-            client,
-            model,
-            usable_files,
-            GAS_NATURAL_EXTRACTION_PROMPT,
-            GasNaturalLLMExtraction,
-        )
-        merged.pop("observacoes", None)
-        elapsed = time.monotonic() - t0
-        logger.info(
-            "Gas natural combined text extraction complete: fields=%d, elapsed=%.1fs",
-            _count_non_null_fields(merged),
-            elapsed,
-        )
-        return merged
-
-    per_file_results: list[tuple[str, dict[str, Any]]] = []
-
-    for sf in usable_files:
-        result = _extract_gas_natural_single_file(client, model, sf)
-        if result:
-            per_file_results.append((sf.original_filename, result))
-            logger.info(
-                "  gas natural %s: %d fields extracted",
-                sf.original_filename,
-                _count_non_null_fields(result),
-            )
-
-    if not per_file_results:
-        logger.warning("Gas natural LLM extraction returned no results from any file")
-        return {}
-
-    if len(per_file_results) == 1:
-        merged = per_file_results[0][1]
-    else:
-        logger.info("Merging %d gas natural per-file extractions with LLM", len(per_file_results))
-        merged = _merge_gas_natural_with_llm(client, model, per_file_results)
-
-    merged.pop("observacoes", None)
-    elapsed = time.monotonic() - t0
-    logger.info(
-        "Gas natural LLM extraction complete: fields=%d, elapsed=%.1fs",
-        _count_non_null_fields(merged),
-        elapsed,
-    )
-
-    return merged
+        logger.debug("GLP LLM extraction disabled, skipping")
+        return LLMExtractionRunResult(context={})
+    return _run_llm_extraction(source_files, GLP_STRATEGY)
 
 
 def extract_glp_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
     """Vision-first extraction for GLP memorial fields only."""
-    if not is_llm_extraction_enabled():
-        logger.debug("GLP LLM extraction disabled, skipping")
-        return {}
-
-    usable_files = [
-        sf for sf in source_files
-        if sf.extracted_text.strip() or sf.page_images
-    ]
-    if not usable_files:
-        logger.info("No extractable content in GLP source files, skipping LLM")
-        return {}
-
-    client = _get_client()
-    model = _get_model()
-    logger.info("GLP LLM vision extraction: model=%s, files=%d", model, len(usable_files))
-
-    t0 = time.monotonic()
-    if len(usable_files) > 1 and all(
-        sf.extracted_text.strip() and len(sf.extracted_text) >= GLP_TEXT_ONLY_THRESHOLD
-        for sf in usable_files
-    ):
-        logger.info("Using single combined GLP text extraction for %d files", len(usable_files))
-        merged = _extract_glp_combined_text(client, model, usable_files)
-        merged.pop("observacoes", None)
-        elapsed = time.monotonic() - t0
-        logger.info("GLP combined text extraction complete: fields=%d, elapsed=%.1fs", _count_non_null_fields(merged), elapsed)
-        return merged
-
-    per_file_results: list[tuple[str, dict[str, Any]]] = []
-
-    for sf in usable_files:
-        result = _extract_glp_single_file(client, model, sf)
-        if result:
-            per_file_results.append((sf.original_filename, result))
-            logger.info("  glp %s: %d fields extracted", sf.original_filename, _count_non_null_fields(result))
-
-    if not per_file_results:
-        logger.warning("GLP LLM extraction returned no results from any file")
-        return {}
-
-    if len(per_file_results) == 1:
-        merged = per_file_results[0][1]
-    else:
-        logger.info("Merging %d GLP per-file extractions with LLM", len(per_file_results))
-        merged = _merge_glp_with_llm(client, model, per_file_results)
-
-    merged.pop("observacoes", None)
-    elapsed = time.monotonic() - t0
-    logger.info("GLP LLM extraction complete: fields=%d, elapsed=%.1fs", _count_non_null_fields(merged), elapsed)
-
-    return merged
+    return extract_glp_with_llm_result(source_files).context

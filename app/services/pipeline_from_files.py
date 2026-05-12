@@ -27,10 +27,10 @@ from app.services.file_ingestion import (
     ingest_uploaded_files,
 )
 from app.services.llm_extractor import (
-    extract_gas_natural_with_llm,
-    extract_glp_with_llm,
-    extract_telecom_with_llm,
-    extract_with_llm,
+    extract_gas_natural_with_llm_result,
+    extract_glp_with_llm_result,
+    extract_telecom_with_llm_result,
+    extract_with_llm_result,
     is_llm_extraction_enabled,
 )
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
@@ -47,6 +47,21 @@ logger = logging.getLogger(__name__)
 _GLP_CONFLICTS_KEY = "_glp_total_points_conflicts"
 _GLP_AUTHORITATIVE_TOTAL_KEY = "_glp_authoritative_total_points"
 _GLP_DIMENSIONAMENTO_FIELDS = ("qtd_fogao", "qtd_aquecedor", "qtd_churrasqueira")
+
+
+def _attach_cross_validation_report(
+    report: ExtractionReport,
+    cross_validation: dict[str, Any] | None,
+) -> ExtractionReport:
+    if not cross_validation:
+        return report
+    return ExtractionReport(
+        filled=report.filled,
+        missing=report.missing,
+        pending=report.pending,
+        evidence=report.evidence,
+        cross_validation=cross_validation,
+    )
 
 def _fill_gaps(base: dict[str, Any], supplement: dict[str, Any]) -> dict[str, Any]:
     """Supplement fills only fields that are missing or None in base."""
@@ -324,7 +339,8 @@ def _extract_llm_primary(
     """LLM vision is the primary extractor; mapper supplements remaining gaps."""
     extraction_result = extract_project_files(files)
 
-    llm_context = extract_with_llm(extraction_result.source_files)
+    llm_result = extract_with_llm_result(extraction_result.source_files)
+    llm_context = llm_result.context
     llm_fields = sum(
         1 for section in llm_context.values()
         if isinstance(section, dict)
@@ -344,6 +360,7 @@ def _extract_llm_primary(
 
     mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
     report = assess_extraction_coverage(mapping)
+    report = _attach_cross_validation_report(report, llm_result.cross_validation)
     logger.info(
         "Extraction coverage: filled=%d, missing=%d, pending=%d",
         len(report.filled), len(report.missing), len(report.pending),
@@ -385,7 +402,8 @@ def extract_telecom_mapping_from_ingested_files(
     if is_llm_extraction_enabled():
         extraction_result = extract_project_files(files)
 
-        llm_context = extract_telecom_with_llm(extraction_result.source_files)
+        llm_result = extract_telecom_with_llm_result(extraction_result.source_files)
+        llm_context = llm_result.context
         llm_fields = sum(
             1 for section in llm_context.values()
             if isinstance(section, dict)
@@ -405,6 +423,7 @@ def extract_telecom_mapping_from_ingested_files(
 
         mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
         report = assess_telecom_extraction_coverage(mapping)
+        report = _attach_cross_validation_report(report, llm_result.cross_validation)
         logger.info(
             "Telecom extraction coverage: filled=%d, missing=%d, pending=%d",
             len(report.filled), len(report.missing), len(report.pending),
@@ -427,7 +446,8 @@ def extract_gas_natural_mapping_from_ingested_files(
     if is_llm_extraction_enabled():
         extraction_result = extract_project_files(files)
 
-        llm_context = extract_gas_natural_with_llm(extraction_result.source_files)
+        llm_result = extract_gas_natural_with_llm_result(extraction_result.source_files)
+        llm_context = llm_result.context
         llm_fields = sum(
             1 for section in llm_context.values()
             if isinstance(section, dict)
@@ -448,6 +468,7 @@ def extract_gas_natural_mapping_from_ingested_files(
 
         mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
         report = assess_gas_natural_extraction_coverage(mapping)
+        report = _attach_cross_validation_report(report, llm_result.cross_validation)
         logger.info(
             "Gas natural extraction coverage: filled=%d, missing=%d, pending=%d",
             len(report.filled), len(report.missing), len(report.pending),
@@ -587,7 +608,8 @@ def extract_glp_mapping_from_ingested_files(
 
     extraction_result = extract_project_files(files)
 
-    llm_context = extract_glp_with_llm(extraction_result.source_files)
+    llm_result = extract_glp_with_llm_result(extraction_result.source_files)
+    llm_context = llm_result.context
     llm_fields = sum(
         1 for section in llm_context.values()
         if isinstance(section, dict)
@@ -616,6 +638,7 @@ def extract_glp_mapping_from_ingested_files(
 
     mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
     report = assess_glp_extraction_coverage(mapping)
+    report = _attach_cross_validation_report(report, llm_result.cross_validation)
     logger.info(
         "GLP extraction coverage: filled=%d, missing=%d, pending=%d",
         len(report.filled), len(report.missing), len(report.pending),

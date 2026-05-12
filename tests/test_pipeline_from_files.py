@@ -13,7 +13,9 @@ from app.services.extraction_mapper import ExtractionReport, MappingResult
 from app.services.file_ingestion import FileIngestionResult, IngestedFileMetadata
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
+from app.services.llm_extractor import LLMExtractionRunResult
 from app.services.pipeline_from_files import (
+    _build_extraction_report_payload,
     _normalize_gas_natural_context,
     _normalize_glp_context,
     _fill_gaps,
@@ -29,7 +31,7 @@ from app.services.pipeline_from_files import (
     generate_memorial_telecom_v1_from_uploaded_files,
     generate_memorial_eletrico_v1_from_uploaded_files,
 )
-from app.services.project_extractor import ProjectExtractionResult
+from app.services.project_extractor import ExtractedSourceFile, ProjectExtractionResult
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +53,16 @@ def build_extraction_result() -> ProjectExtractionResult:
         raw_text="CONSTRUTORA: Exemplo Engenharia LTDA",
         source_files=[],
         signals={"total_files": 1},
+    )
+
+
+def build_extracted_source_file(filename: str) -> ExtractedSourceFile:
+    return ExtractedSourceFile(
+        original_filename=filename,
+        stored_filename=filename,
+        extension=".pdf",
+        saved_path=f"/tmp/{filename}",
+        extracted_text="",
     )
 
 
@@ -93,12 +105,38 @@ class MapperOnlyPathTests(unittest.TestCase):
         assess_mock.assert_called_once()
 
 
+class ExtractionReportPayloadTests(unittest.TestCase):
+    def test_build_extraction_report_payload_keeps_cross_validation_details(self) -> None:
+        report = ExtractionReport(
+            filled=["obra.construtora"],
+            missing=[],
+            pending=[],
+            cross_validation={
+                "batch_size": 5,
+                "batch_count": 3,
+                "candidate_count": 7,
+                "resolved_fields": ["obra.construtora"],
+                "conflicts": [{"field_path": "obra.construtora"}],
+                "fallback_used": True,
+            },
+        )
+
+        payload = _build_extraction_report_payload(
+            report,
+            conflicts=[{"type": "glp_total_points_conflict"}],
+        )
+
+        self.assertEqual(payload["cross_validation"]["batch_size"], 5)
+        self.assertTrue(payload["cross_validation"]["fallback_used"])
+        self.assertEqual(payload["conflicts"], [{"type": "glp_total_points_conflict"}])
+
+
 class LLMPrimaryPathTests(unittest.TestCase):
     """Tests for the LLM-primary extraction path."""
 
     @patch("app.services.pipeline_from_files.assess_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
-    @patch("app.services.pipeline_from_files.extract_with_llm")
+    @patch("app.services.pipeline_from_files.extract_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_llm_primary_uses_llm_as_base(
         self,
@@ -117,7 +155,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         map_mock.return_value = mapper_mapping
         assess_mock.return_value = report
 
@@ -129,7 +167,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
 
     @patch("app.services.pipeline_from_files.assess_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
-    @patch("app.services.pipeline_from_files.extract_with_llm")
+    @patch("app.services.pipeline_from_files.extract_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_mapper_supplements_llm_gaps(
         self,
@@ -147,7 +185,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         map_mock.return_value = mapper_mapping
         assess_mock.return_value = report
 
@@ -158,7 +196,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
 
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
-    @patch("app.services.pipeline_from_files.extract_with_llm")
+    @patch("app.services.pipeline_from_files.extract_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_eletrico_llm_failure_stops_generation(
         self,
@@ -180,7 +218,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
 
     @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_telecom_context")
-    @patch("app.services.pipeline_from_files.extract_telecom_with_llm")
+    @patch("app.services.pipeline_from_files.extract_telecom_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_telecom_llm_primary_uses_llm_as_base(
         self,
@@ -198,7 +236,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         map_mock.return_value = mapper_mapping
         assess_mock.return_value = report
 
@@ -211,7 +249,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
 
     @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_telecom_context")
-    @patch("app.services.pipeline_from_files.extract_telecom_with_llm")
+    @patch("app.services.pipeline_from_files.extract_telecom_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_telecom_mapper_supplements_llm_gaps(
         self,
@@ -229,7 +267,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         map_mock.return_value = mapper_mapping
         assess_mock.return_value = report
 
@@ -241,7 +279,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
 
     @patch("app.services.pipeline_from_files.assess_gas_natural_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_gas_natural_context")
-    @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm")
+    @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_gas_natural_llm_primary_uses_llm_as_base(
         self,
@@ -260,7 +298,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         map_mock.return_value = mapper_mapping
         assess_mock.return_value = report
 
@@ -273,7 +311,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
 
     @patch("app.services.pipeline_from_files.assess_gas_natural_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_gas_natural_context")
-    @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm")
+    @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_gas_natural_mapper_supplements_llm_gaps(
         self,
@@ -291,7 +329,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         map_mock.return_value = mapper_mapping
         assess_mock.return_value = report
 
@@ -301,9 +339,47 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Gas")
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
 
+    @patch("app.services.pipeline_from_files.assess_gas_natural_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_gas_natural_mapper_fills_llm_null_typology_from_sheet_filenames(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = ProjectExtractionResult(
+            raw_text="PROJETO DE INSTALAÇÕES DE GÁS NATURAL",
+            source_files=[
+                build_extracted_source_file("01_mga_mondo_g_s_01_subsolo_ao_3_pav_18_07_2023.pdf"),
+                build_extracted_source_file("02_mga_mondo_g_s_02_4_e_5_pav_18_07_2023.pdf"),
+                build_extracted_source_file("03_mga_mondo_g_s_03_6_pav_e_cobertura_18_07_2023.pdf"),
+            ],
+            signals={"total_files": 3},
+        )
+        llm_context = {
+            "obra": {
+                "construtora": "LLM Gas",
+                "tipologia": None,
+            },
+        }
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
+        assess_mock.return_value = build_extraction_report()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, _ = extract_gas_natural_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(
+            result_mapping.context["obra"]["tipologia"],
+            "Subsolo, 6 pavimentos, cobertura",
+        )
+
     @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
-    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_glp_mapper_supplements_llm_gaps(
         self,
@@ -339,7 +415,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         map_mock.return_value = mapper_mapping
         assess_mock.return_value = report
 
@@ -352,7 +428,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.context["dimensionamento"]["qtd_aquecedor"], 0)
 
     @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
-    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_glp_mapper_extracts_appliance_counts_from_ocr_text_and_reconciles_total_points(
         self,
@@ -383,7 +459,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         assess_mock.return_value = report
 
         with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
@@ -398,7 +474,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.evidence["dimensionamento.qtd_churrasqueira"].value, 5)
 
     @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
-    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_glp_mapper_does_not_default_to_zero_for_appliance_mentions_without_numeric_evidence(
         self,
@@ -427,7 +503,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         report = build_extraction_report()
 
         extract_files_mock.return_value = extraction_result
-        extract_llm_mock.return_value = llm_context
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
         assess_mock.return_value = report
 
         with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
@@ -526,7 +602,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_glp_v1")
     @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
-    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_glp_pipeline_stops_before_render_when_total_points_conflict_is_unresolved(
         self,
@@ -541,7 +617,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         output_path = ROOT / "tests" / "output" / "pipeline_from_files_glp_unresolved_conflict.docx"
 
         extract_mock.return_value = extraction_result
-        extract_llm_mock.return_value = {
+        extract_llm_mock.return_value = LLMExtractionRunResult(context={
             "obra": {"construtora": "LLM GLP"},
             "dimensionamento": {
                 "qtd_fogao": 56,
@@ -549,7 +625,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
                 "qtd_churrasqueira": 5,
             },
             "soma": {"qtd_pontos_de_utilizacao": 10},
-        }
+        })
         map_mock.return_value = MappingResult(context={}, evidence={})
         assess_mock.return_value = build_extraction_report()
         generate_mock.return_value = PipelineResult(context={}, output_path=output_path)
@@ -586,7 +662,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_glp_v1")
     @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
-    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_glp_pipeline_records_resolved_total_points_conflict_in_error_report(
         self,
@@ -602,7 +678,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         output_path = ROOT / "tests" / "output" / "pipeline_from_files_glp_resolved_conflict.docx"
 
         extract_mock.return_value = extraction_result
-        extract_llm_mock.return_value = {
+        extract_llm_mock.return_value = LLMExtractionRunResult(context={
             "obra": {"construtora": "LLM GLP"},
             "dimensionamento": {
                 "qtd_fogao": 56,
@@ -610,7 +686,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
                 "qtd_churrasqueira": 5,
             },
             "soma": {"qtd_pontos_de_utilizacao": 999},
-        }
+        })
         map_mock.return_value = MappingResult(context={}, evidence={})
         assess_mock.return_value = report
         generate_mock.side_effect = MemorialValidationError(
@@ -648,7 +724,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_glp_v1")
     @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
-    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_glp_pipeline_prefers_table_sum_for_total_points_over_conflicting_isolated_value(
         self,
@@ -663,7 +739,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
         output_path = ROOT / "tests" / "output" / "pipeline_from_files_glp_total_points.docx"
 
         extract_mock.return_value = extraction_result
-        extract_llm_mock.return_value = {
+        extract_llm_mock.return_value = LLMExtractionRunResult(context={
             "obra": {"construtora": "LLM GLP"},
             "dimensionamento": {
                 "qtd_fogao": 56,
@@ -678,7 +754,7 @@ class LLMPrimaryPathTests(unittest.TestCase):
             },
             "numero": {"prancha": "05/05"},
             "teto_ou_piso": "TETO",
-        }
+        })
         map_mock.return_value = MappingResult(context={}, evidence={})
         assess_mock.return_value = build_extraction_report()
         generate_mock.return_value = PipelineResult(context={}, output_path=output_path)
@@ -873,7 +949,7 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
     @patch("app.services.pipeline_from_files.generate_memorial_glp_v1")
     @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_context")
-    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
     def test_runs_glp_pipeline_preserving_original_ramal_diameter(
         self,
@@ -889,7 +965,7 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
         output_path = ROOT / "tests" / "output" / "pipeline_from_files_glp.docx"
 
         extract_mock.return_value = extraction_result
-        extract_llm_mock.return_value = {
+        extract_llm_mock.return_value = LLMExtractionRunResult(context={
             "obra": {"construtora": "LLM GLP"},
             "abastecimento": {"qtd_tanques": 2, "pavimento": "terreo"},
             "dimensionamento": {"qtd_fogao": 56, "qtd_aquecedor": 0, "qtd_churrasqueira": 5},
@@ -897,7 +973,7 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
             "ramal": {"primario_diametro": '1 1/4"', "primario_material": "aco carbono", "primario_pavimento": "subsolo"},
             "numero": {"prancha": "05/05"},
             "teto_ou_piso": "teto",
-        }
+        })
         map_mock.return_value = build_mapping_result()
         assess_mock.return_value = report
         generate_mock.return_value = PipelineResult(

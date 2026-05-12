@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app, create_app
 from app.services.extraction_mapper import ExtractionReport, MappingResult
+from app.services.llm_extractor import LLMExtractionRunResult
 from app.services.memorial_renderer import MemorialRenderError
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
@@ -721,7 +722,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400, response.text)
         self.assertIn("LLM", response.json()["detail"])
 
-    @patch("app.services.pipeline_from_files.extract_glp_with_llm")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
     def test_post_memorial_glp_from_real_project_files_returns_docx_with_llm_context(
         self,
         llm_mock,
@@ -731,7 +732,7 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(pdf_paths, "Expected PDF fixtures in projects/gas-glp")
 
         payload = load_fixture("glp_base.json")
-        llm_mock.return_value = {
+        llm_mock.return_value = LLMExtractionRunResult(context={
             "obra": {
                 "construtora": payload["obra"]["construtora"],
                 "nome": payload["obra"]["nome"],
@@ -753,7 +754,7 @@ class ApiTests(unittest.TestCase):
             "ramal": payload["ramal"],
             "numero": payload["numero"],
             "teto_ou_piso": payload["teto_ou_piso"],
-        }
+        })
 
         file_handles = []
         try:
