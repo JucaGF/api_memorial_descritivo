@@ -91,7 +91,7 @@ Não há seções condicionais identificadas no template GLP v1 atual.
 ## Tipos e restricoes
 
 - obra.qtd_apartamentos, obra.qtd_lojas e obra.qtd_restaurantes: integer >= 0.
-- abastecimento.qtd_tanques: integer >= 1.
+- abastecimento.qtd_tanques: integer >= 1. Representa a quantidade de ABRIGOS de gás GLP do empreendimento, NÃO a quantidade de recipientes/cilindros P-190 internos ao abrigo. Um abrigo pode conter múltiplos P-190 e, ainda assim, este campo é 1. O nome do campo é histórico; a semântica correta é "número de abrigos".
 - dimensionamento.qtd_fogao, dimensionamento.qtd_aquecedor e dimensionamento.qtd_churrasqueira: integer >= 0.
 - soma.qtd_pontos_de_utilizacao: integer >= 0.
 - ramal.primario_diametro: string, preservando a notação indicada no projeto.
@@ -99,7 +99,7 @@ Não há seções condicionais identificadas no template GLP v1 atual.
 
 ## Diferenças em relação ao gas_natural v1
 
-- GLP usa `abastecimento` (qtd_tanques, pavimento) no lugar de `crm` (pavimento).
+- GLP usa `abastecimento` (qtd_tanques, pavimento) no lugar de `crm` (pavimento). `qtd_tanques` conta abrigos de gás, não recipientes P-190.
 - GLP não possui `valvula` (esfera_diametro), que é específico do gás natural canalizado.
 
 ## Casos de teste obrigatorios

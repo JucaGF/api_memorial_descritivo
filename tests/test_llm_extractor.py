@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import re
 import unittest
 from unittest.mock import MagicMock, patch
 
 from app.services.llm_extractor import (
     EnergiaExtraction,
     GasNaturalLLMExtraction,
+    GLP_EXTRACTION_PROMPT,
+    GLP_V2_EXTRACTION_PROMPT,
     GlpLLMExtraction,
     GeradorExtraction,
     InstalacaoExtraction,
@@ -233,6 +236,166 @@ class VisionInputTests(unittest.TestCase):
         content = messages[0]["content"]
         image_parts = [p for p in content if p.get("type") == "input_image"]
         self.assertEqual(len(image_parts), 0)
+
+
+class OpenAIClientResilienceTests(unittest.TestCase):
+    """Bug 9 — large project failure should not surface as a generic connection error.
+
+    Two protections:
+    1. OpenAI client has a configurable timeout (so requests do not hang forever).
+    2. _extract_batch tolerates per-file failures: a single OpenAI error in a
+       batch of N files does NOT abort the whole batch; the other N-1 files
+       contribute to the merged context.
+    """
+
+    def test_get_request_timeout_uses_default_when_env_missing(self) -> None:
+        from app.services import llm_extractor
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_REQUEST_TIMEOUT", None)
+            self.assertEqual(llm_extractor._get_request_timeout(), 60.0)
+
+    def test_get_request_timeout_parses_env_value(self) -> None:
+        from app.services import llm_extractor
+
+        with patch.dict(os.environ, {"OPENAI_REQUEST_TIMEOUT": "120"}, clear=False):
+            self.assertEqual(llm_extractor._get_request_timeout(), 120.0)
+
+    def test_get_request_timeout_falls_back_on_invalid_value(self) -> None:
+        from app.services import llm_extractor
+
+        with patch.dict(os.environ, {"OPENAI_REQUEST_TIMEOUT": "lots"}, clear=False):
+            self.assertEqual(llm_extractor._get_request_timeout(), 60.0)
+
+    def test_get_request_timeout_falls_back_on_negative_value(self) -> None:
+        from app.services import llm_extractor
+
+        with patch.dict(os.environ, {"OPENAI_REQUEST_TIMEOUT": "-5"}, clear=False):
+            self.assertEqual(llm_extractor._get_request_timeout(), 60.0)
+
+    def test_extract_batch_isolates_per_file_failures(self) -> None:
+        """1 file raises -> the batch still returns results from the other files."""
+        from app.services import llm_extractor
+
+        source_files = [
+            _source_file(name=f"file_{i}.pdf", text=f"texto {i}")
+            for i in range(5)
+        ]
+
+        call_log: list[str] = []
+
+        def fake_single_file(client, model, source_file):
+            call_log.append(source_file.original_filename)
+            if source_file.original_filename == "file_2.pdf":
+                raise TimeoutError("simulated OpenAI timeout")
+            return {"obra": {"nome": f"From {source_file.original_filename}"}}
+
+        strategy = llm_extractor.ExtractionStrategy(
+            name="TestStrategy",
+            cross_validation_intro="x",
+            text_format=llm_extractor.LLMExtraction,
+            single_file_extractor=fake_single_file,
+            batch_merger=lambda client, model, per_file: per_file[0][1],
+        )
+
+        result = llm_extractor._extract_batch(
+            strategy=strategy,
+            client=MagicMock(),
+            model="gpt-test",
+            batch_index=0,
+            source_files=source_files,
+            max_concurrency=2,
+        )
+
+        self.assertEqual(len(result.per_file_results), 5)
+        errors = [r for r in result.per_file_results if r.extraction_type == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].filename, "file_2.pdf")
+        self.assertIsNotNone(errors[0].error)
+        self.assertIn("timeout", (errors[0].error or "").lower())
+        ok = [r for r in result.per_file_results if r.extraction_type != "error"]
+        filenames = sorted(item.filename for item in ok)
+        self.assertEqual(
+            filenames,
+            ["file_0.pdf", "file_1.pdf", "file_3.pdf", "file_4.pdf"],
+        )
+        self.assertNotIn("file_2.pdf", filenames)
+
+    def test_extract_batch_returns_empty_when_all_files_fail(self) -> None:
+        from app.services import llm_extractor
+
+        source_files = [_source_file(name=f"file_{i}.pdf") for i in range(3)]
+
+        def always_fail(client, model, source_file):
+            raise RuntimeError("OpenAI down")
+
+        strategy = llm_extractor.ExtractionStrategy(
+            name="TestStrategy",
+            cross_validation_intro="x",
+            text_format=llm_extractor.LLMExtraction,
+            single_file_extractor=always_fail,
+            batch_merger=lambda *args, **kwargs: {},
+        )
+
+        result = llm_extractor._extract_batch(
+            strategy=strategy,
+            client=MagicMock(),
+            model="gpt-test",
+            batch_index=0,
+            source_files=source_files,
+            max_concurrency=2,
+        )
+
+        self.assertEqual(result.merged_payload, {})
+        self.assertEqual(len(result.per_file_results), 3)
+        self.assertTrue(all(r.extraction_type == "error" for r in result.per_file_results))
+
+
+class GlpExtractionPromptTests(unittest.TestCase):
+    """Guarda a semântica de qtd_tanques (= contagem de abrigos, não de P-190).
+
+    A redação do prompt já causou bug em projeto MAKAI (LLM contou os 2 P-190
+    dentro do abrigo em vez de contar 1 abrigo). Estes testes travam regressão
+    futura do texto.
+    """
+
+    @staticmethod
+    def _normalized_prompt() -> str:
+        return re.sub(r"\s+", " ", GLP_EXTRACTION_PROMPT.lower())
+
+    def test_prompt_describes_qtd_tanques_as_shelters(self) -> None:
+        self.assertIn("qtd_tanques", GLP_EXTRACTION_PROMPT)
+        lowered = self._normalized_prompt()
+        self.assertIn("shelter", lowered)
+        self.assertIn("abrigo", lowered)
+
+    def test_prompt_warns_against_counting_p190_recipients(self) -> None:
+        lowered = self._normalized_prompt()
+        self.assertIn("p-190", lowered)
+        self.assertIn("not the number of p-190", lowered)
+
+    def test_prompt_has_concrete_negative_example(self) -> None:
+        lowered = self._normalized_prompt()
+        self.assertIn("return 1, not 2", lowered)
+
+
+class GlpV2ExtractionPromptTests(unittest.TestCase):
+    """GLP v2 — anti-conflation rules in GLP_V2_EXTRACTION_PROMPT."""
+
+    @staticmethod
+    def _normalized_prompt() -> str:
+        return re.sub(r"\s+", " ", GLP_V2_EXTRACTION_PROMPT.lower())
+
+    def test_prompt_distinguishes_shelters_from_recipients(self) -> None:
+        n = self._normalized_prompt()
+        self.assertIn("abrigo", n)
+        self.assertIn("recipient", n)
+
+    def test_prompt_forbids_equating_fogao_and_apartamentos_without_evidence(self) -> None:
+        n = self._normalized_prompt()
+        self.assertIn("qtd_apartamentos", n)
+        self.assertIn("fogao", n)
+        self.assertIn("never", n)
 
 
 class FirstNonNullMergeTests(unittest.TestCase):

@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MemorialGlpContextV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "documento",
+    "obra",
+    "tanques",
+    "abastecimento",
+    "dimensionamento",
+    "pontos_utilizacao",
+    "diametros",
+    "ramal",
+    "numero",
+    "teto_ou_piso",
+    "context_version",
+    "template_version"
+  ],
+  "properties": {
+    "documento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_atual"],
+      "properties": {
+        "data_atual": {
+          "type": "string",
+          "description": "Data exibida na capa do memorial."
+        }
+      }
+    },
+    "obra": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "numero_cadastro",
+        "construtora",
+        "nome",
+        "localizacao",
+        "tipo_edificacao",
+        "tipologia",
+        "qtd_apartamentos",
+        "qtd_lojas",
+        "qtd_restaurantes"
+      ],
+      "properties": {
+        "numero_cadastro": {"type": "string"},
+        "construtora": {"type": "string"},
+        "nome": {"type": "string"},
+        "localizacao": {"type": "string"},
+        "tipo_edificacao": {"type": "string"},
+        "tipologia": {"type": "string"},
+        "qtd_apartamentos": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["valor"],
+          "properties": {
+            "valor": {"type": "integer", "minimum": 0},
+            "fonte_evidencia": {"$ref": "#/$defs/evidence_list"},
+            "confianca": {"$ref": "#/$defs/confianca"}
+          },
+          "description": "Quantidade de apartamentos com proveniência (LLM, tabela quantitativa, listagem de unidades). Evita que extração antiga sobrescreva fresca."
+        },
+        "qtd_lojas": {"type": "integer", "minimum": 0},
+        "qtd_restaurantes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "tanques": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quantidade"],
+      "description": "Quantidade de RECIPIENTES (cilindros/tanques) GLP instalados, distinto de quantidade de abrigos. Detalhes de legendas, cortes e tabelas de referência não contam.",
+      "properties": {
+        "quantidade": {"type": "integer", "minimum": 0},
+        "tipo": {"type": "string", "description": "Ex: 'P-190'."},
+        "capacidade_kg": {"type": "number", "minimum": 0},
+        "qtd_abrigos": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de abrigos que contêm os recipientes."
+        },
+        "fonte_evidencia": {"$ref": "#/$defs/evidence_list"},
+        "conflitos": {"$ref": "#/$defs/conflict_list"}
+      }
+    },
+    "abastecimento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pavimento"],
+      "properties": {
+        "pavimento": {"type": "string"},
+        "fonte_evidencia": {"$ref": "#/$defs/evidence_list"}
+      }
+    },
+    "dimensionamento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qtd_fogao", "qtd_aquecedor", "qtd_churrasqueira"],
+      "properties": {
+        "qtd_fogao": {"type": "integer", "minimum": 0},
+        "qtd_aquecedor": {"type": "integer", "minimum": 0},
+        "qtd_churrasqueira": {"type": "integer", "minimum": 0},
+        "qtd_outros": {"type": "integer", "minimum": 0}
+      },
+      "description": "Quantidades por tipo de equipamento. Apartment count NUNCA deve ser usado como proxy direto destes valores."
+    },
+    "pontos_utilizacao": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fogao", "churrasqueira", "aquecedor", "outros", "total_calculado"],
+      "description": "Pontos de utilização por tipo + totais extraído e calculado. Se total_extraido difere de total_calculado, gera conflito em conflitos[].",
+      "properties": {
+        "fogao": {"type": "integer", "minimum": 0},
+        "churrasqueira": {"type": "integer", "minimum": 0},
+        "aquecedor": {"type": "integer", "minimum": 0},
+        "outros": {"type": "integer", "minimum": 0},
+        "total_extraido": {"type": ["integer", "null"], "minimum": 0},
+        "total_calculado": {"type": "integer", "minimum": 0},
+        "fontes_evidencia": {"$ref": "#/$defs/evidence_list"},
+        "conflitos": {"$ref": "#/$defs/conflict_list"}
+      }
+    },
+    "diametros": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tubulacao_principal", "valvula_esfera"],
+      "properties": {
+        "tubulacao_principal": {"$ref": "#/$defs/diameter"},
+        "valvula_esfera": {"$ref": "#/$defs/diameter"}
+      }
+    },
+    "ramal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primario_material", "primario_pavimento"],
+      "properties": {
+        "primario_material": {"type": "string"},
+        "primario_pavimento": {"type": "string"}
+      }
+    },
+    "numero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prancha"],
+      "properties": {
+        "prancha": {"type": "string"}
+      }
+    },
+    "teto_ou_piso": {"type": "string"},
+    "context_version": {
+      "type": "string",
+      "const": "glp_v2",
+      "description": "Identifica a versão do contrato. Dashboard/chatbot/site usam este campo para escolher a projeção correta."
+    },
+    "template_version": {
+      "type": "string",
+      "const": "glp_v2",
+      "description": "Identifica a versão do template DOCX usado na renderização."
+    }
+  },
+  "$defs": {
+    "confianca": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "evidence_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["regra"],
+      "properties": {
+        "texto": {"type": "string", "description": "Trecho citado da fonte (OCR/texto do projeto)."},
+        "regra": {"type": "string", "description": "Identificador da heurística/regra que produziu o valor."},
+        "fonte": {"type": "string", "description": "Identificador da origem (ex: nome do arquivo, sheet, página)."},
+        "confianca": {"$ref": "#/$defs/confianca"}
+      }
+    },
+    "evidence_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidence_item"}
+    },
+    "conflict_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tipo", "status"],
+      "properties": {
+        "tipo": {"type": "string"},
+        "status": {
+          "type": "string",
+          "enum": ["resolved", "unresolved"]
+        },
+        "valores_observados": {
+          "type": "array",
+          "items": {}
+        },
+        "fontes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "mensagem": {"type": "string"}
+      }
+    },
+    "conflict_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/conflict_item"}
+    },
+    "diameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valor", "unidade", "valor_formatado"],
+      "description": "Diâmetro normalizado. valor é numérico, unidade é EXPLÍCITA ('in' ou 'mm'), valor_formatado preserva a notação original (fração quando aplicável).",
+      "properties": {
+        "valor": {"type": "number", "minimum": 0},
+        "unidade": {"type": "string", "enum": ["in", "mm"]},
+        "valor_formatado": {"type": "string"},
+        "valor_original": {"type": "string"},
+        "fonte_evidencia": {"$ref": "#/$defs/evidence_list"},
+        "inferido": {
+          "type": "boolean",
+          "description": "Quando true (típico em valvula_esfera), o valor foi inferido a partir da tubulação principal."
+        }
+      }
+    }
+  }
+}

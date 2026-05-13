@@ -29,6 +29,7 @@ class BatchFileExtractionResult:
     filename: str
     extraction_type: str
     payload: dict[str, Any]
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,11 @@ class GasNaturalLLMExtraction(BaseModel):
 
 
 class AbastecimentoExtraction(BaseModel):
+    # qtd_tanques representa a QUANTIDADE DE ABRIGOS de gás GLP do
+    # empreendimento — NÃO a quantidade de recipientes/cilindros P-190 que
+    # ficam dentro do abrigo. Um abrigo típico contém múltiplos P-190 e ainda
+    # assim qtd_tanques deve ser 1. O nome do campo é histórico; a semântica
+    # correta é "número de abrigos".
     qtd_tanques: int | None = None
     pavimento: str | None = None
 
@@ -174,6 +180,50 @@ class GlpLLMExtraction(BaseModel):
     abastecimento: AbastecimentoExtraction = AbastecimentoExtraction()
     dimensionamento: DimensionamentoExtraction = DimensionamentoExtraction()
     soma: SomaExtraction = SomaExtraction()
+    ramal: RamalExtraction = RamalExtraction()
+    numero: NumeroExtraction = NumeroExtraction()
+    teto_ou_piso: str | None = None
+    observacoes: str | None = None
+
+
+class TanquesV2LLMExtraction(BaseModel):
+    quantidade: int | None = None
+    tipo: str | None = None
+    capacidade_kg: float | None = None
+    qtd_abrigos: int | None = None
+
+
+class PontosUtilizacaoV2LLMExtraction(BaseModel):
+    fogao: int | None = None
+    churrasqueira: int | None = None
+    aquecedor: int | None = None
+    outros: int | None = None
+    total_extraido: int | None = None
+
+
+class DiametrosV2LLMExtraction(BaseModel):
+    tubulacao_principal: str | None = None
+    valvula_esfera: str | None = None
+
+
+class AbastecimentoV2LLMExtraction(BaseModel):
+    pavimento: str | None = None
+
+
+class DimensionamentoV2LLMExtraction(BaseModel):
+    qtd_fogao: int | None = None
+    qtd_aquecedor: int | None = None
+    qtd_churrasqueira: int | None = None
+    qtd_outros: int | None = None
+
+
+class GlpV2LLMExtraction(BaseModel):
+    obra: ObraExtraction = ObraExtraction()
+    tanques: TanquesV2LLMExtraction = TanquesV2LLMExtraction()
+    abastecimento: AbastecimentoV2LLMExtraction = AbastecimentoV2LLMExtraction()
+    dimensionamento: DimensionamentoV2LLMExtraction = DimensionamentoV2LLMExtraction()
+    pontos_utilizacao: PontosUtilizacaoV2LLMExtraction = PontosUtilizacaoV2LLMExtraction()
+    diametros: DiametrosV2LLMExtraction = DiametrosV2LLMExtraction()
     ramal: RamalExtraction = RamalExtraction()
     numero: NumeroExtraction = NumeroExtraction()
     teto_ou_piso: str | None = None
@@ -438,9 +488,13 @@ Look at the title block, cover sheet, or project notes.
 - qtd_restaurantes
 
 ### abastecimento
-Look for the GLP tank area drawing, tank specifications, or supply description.
-- qtd_tanques: number of GLP tanks (typically P-190 type)
-- pavimento: floor/level where the GLP tank shelter is located
+Look for the GLP shelter area drawing (abrigo de gás), tank specifications, or supply description.
+- qtd_tanques: number of GLP gas SHELTERS (abrigos de gás) in the project — NOT the
+  number of P-190 cylinders/recipients inside the shelter. Most projects have ONE
+  shelter even when it contains multiple P-190 recipients. Example: if the drawing
+  shows ONE shelter ("abrigo de gás") containing TWO P-190 cylinders, return 1, not 2.
+  Despite the field name "qtd_tanques", this field counts SHELTERS, not tanks/cylinders.
+- pavimento: floor/level where the GLP gas shelter is located
 
 ### dimensionamento
 Look for appliance count tables or design notes.
@@ -491,6 +545,60 @@ Rules:
 Per-file extractions:
 """
 
+GLP_V2_EXTRACTION_PROMPT = """\
+You are an expert structured data extractor for Brazilian GLP engineering projects using the \
+Memorial GLP **v2** contract (richer evidence, tanks vs shelters, utilization breakdown, diameters).
+
+Images are the PRIMARY source of truth; OCR text supplements them.
+
+## tanques (storage)
+- quantidade: count of **installed GLP cylinders/recipients** (e.g. P-190) in the project, NOT legend-only \
+symbols. Ignore duplicate depictions of the same physical group in details/sections.
+- tipo: tank type label when visible (e.g. P-190).
+- capacidade_kg: capacity in kg when explicit.
+- qtd_abrigos: count of **shelters / abrigos** housing those recipients — distinct from recipient count. \
+Do NOT multiply shelters by cylinders: recipients live inside shelters.
+
+## obra
+Same fields as v1. For qtd_apartamentos, count from unit lists / schedules — NEVER set qtd_fogao equal to \
+qtd_apartamentos unless a quantitative table explicitly ties stoves to "unidades tipo apartamento" with evidence.
+
+## abastecimento
+- pavimento: floor where the GLP installation is located.
+
+## dimensionamento
+Per-appliance counts from tables or notes: qtd_fogao, qtd_aquecedor, qtd_churrasqueira, qtd_outros.
+
+## pontos_utilizacao
+Extract per type when possible. total_extraido: total from project tables or explicit "pontos" totals when \
+they cover all utilization types shown — not raw apartment count.
+
+## diametros
+- tubulacao_principal and valvula_esfera: preserve **exact** source notation as strings (e.g. `1 1/4"`, `32 mm`). \
+Do not convert units.
+
+## ramal / numero / teto_ou_piso
+Same semantics as GLP v1 (`primario_diametro` may still be filled for cross-check).
+
+## Rules
+- Return null without evidence; never fabricate numbers to close totals.
+- Distinguish **legends, typical details, and symbolic repeats** from physically installed quantities.
+- In observacoes, flag ambiguities (e.g. fogão vs apartamentos, conflicting totals).
+"""
+
+GLP_V2_MERGE_PROMPT = """\
+You are merging GLP **v2** structured extractions from multiple files of the SAME project.
+
+Rules:
+- Prefer authoritative sources: title blocks for obra, shelter/tank drawings for tanques, quantitative tables \
+for dimensionamento and pontos_utilizacao, line / detail legends for diametros.
+- When files disagree on counts, keep both observations in observacoes and choose the most corroborated value.
+- Preserve diameter strings verbatim.
+- Return null only when NO file provided a value.
+
+Per-file extractions:
+"""
+
 GENERIC_CROSS_VALIDATION_PROMPT = """\
 You are performing cross-validation for structured memorial extraction candidates from the SAME project.
 
@@ -517,10 +625,29 @@ def _get_model() -> str:
     return os.getenv("OPENAI_MODEL", "gpt-5.4")
 
 
+def _get_request_timeout() -> float:
+    raw = os.getenv("OPENAI_REQUEST_TIMEOUT", "60").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid OPENAI_REQUEST_TIMEOUT=%r, falling back to 60.0",
+            raw,
+        )
+        return 60.0
+    if value <= 0:
+        logger.warning(
+            "Non-positive OPENAI_REQUEST_TIMEOUT=%r, falling back to 60.0",
+            raw,
+        )
+        return 60.0
+    return value
+
+
 def _get_client() -> Any:
     from openai import OpenAI
 
-    return OpenAI()
+    return OpenAI(timeout=_get_request_timeout())
 
 
 # ── Vision input builders ─────────────────────────────────────────────────────
@@ -666,6 +793,45 @@ def _build_glp_combined_text_input(
     return _build_combined_text_input(source_files, GLP_EXTRACTION_PROMPT)
 
 
+def _build_glp_v2_vision_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [
+        {"type": "input_text", "text": GLP_V2_EXTRACTION_PROMPT},
+    ]
+
+    for page_image in source_file.page_images:
+        content.append({
+            "type": "input_image",
+            "image_url": page_image,
+            "detail": "original",
+        })
+
+    if source_file.extracted_text.strip():
+        content.append({
+            "type": "input_text",
+            "text": f"Supplementary OCR text from {source_file.original_filename}:\n"
+                    f"{source_file.extracted_text}",
+        })
+
+    return [{"role": "user", "content": content}]
+
+
+def _build_glp_v2_text_only_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": GLP_V2_EXTRACTION_PROMPT},
+        {
+            "type": "input_text",
+            "text": f"=== FILE: {source_file.original_filename} ===\n"
+                    f"{source_file.extracted_text}",
+        },
+    ]}]
+
+
+def _build_glp_v2_combined_text_input(
+    source_files: list[ExtractedSourceFile],
+) -> list[dict[str, Any]]:
+    return _build_combined_text_input(source_files, GLP_V2_EXTRACTION_PROMPT)
+
+
 def _build_combined_text_input(
     source_files: list[ExtractedSourceFile],
     prompt: str,
@@ -726,6 +892,18 @@ def _build_glp_merge_input(
 
     return [{"role": "user", "content": [
         {"type": "input_text", "text": GLP_MERGE_PROMPT + "\n\n".join(sections)},
+    ]}]
+
+
+def _build_glp_v2_merge_input(
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    sections = []
+    for filename, extraction in per_file_results:
+        sections.append(f"=== {filename} ===\n{json.dumps(extraction, ensure_ascii=False, indent=2)}")
+
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": GLP_V2_MERGE_PROMPT + "\n\n".join(sections)},
     ]}]
 
 
@@ -895,6 +1073,33 @@ def _extract_glp_single_file(
     return response.output_parsed.model_dump(mode="json")
 
 
+def _extract_glp_v2_single_file(
+    client: Any,
+    model: str,
+    source_file: ExtractedSourceFile,
+) -> dict[str, Any]:
+    has_images = bool(source_file.page_images)
+    use_text_only = bool(source_file.extracted_text.strip()) and len(source_file.extracted_text) >= GLP_TEXT_ONLY_THRESHOLD
+    input_messages = (
+        _build_glp_v2_text_only_input(source_file)
+        if use_text_only or not has_images
+        else _build_glp_v2_vision_input(source_file)
+    )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": input_messages,
+        "text_format": GlpV2LLMExtraction,
+    }
+    if has_images and not use_text_only:
+        kwargs["reasoning"] = {"effort": "high"}
+
+    response = client.responses.parse(**kwargs)
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
 def _extract_glp_combined_text(
     client: Any,
     model: str,
@@ -919,6 +1124,21 @@ def _merge_glp_with_llm(
         model=model,
         input=_build_glp_merge_input(per_file_results),
         text_format=GlpLLMExtraction,
+    )
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _merge_glp_v2_with_llm(
+    client: Any,
+    model: str,
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    response = client.responses.parse(
+        model=model,
+        input=_build_glp_v2_merge_input(per_file_results),
+        text_format=GlpV2LLMExtraction,
     )
     if response.output_parsed is None:
         return {}
@@ -1059,12 +1279,32 @@ def _extract_batch(
 ) -> BatchExtractionResult:
     per_file_results: list[BatchFileExtractionResult] = []
     with ThreadPoolExecutor(max_workers=min(max_concurrency, len(source_files))) as executor:
-        futures = [
-            executor.submit(_extract_file_with_metadata, strategy, client, model, source_file)
+        future_to_file = {
+            executor.submit(
+                _extract_file_with_metadata, strategy, client, model, source_file
+            ): source_file
             for source_file in source_files
-        ]
-        for future in futures:
-            result = future.result()
+        }
+        for future, source_file in future_to_file.items():
+            try:
+                result = future.result()
+            except Exception as exc:
+                logger.warning(
+                    "%s LLM extraction failed for file %s (batch=%d): error_type=%s",
+                    strategy.name,
+                    source_file.original_filename,
+                    batch_index,
+                    type(exc).__name__,
+                )
+                per_file_results.append(
+                    BatchFileExtractionResult(
+                        filename=source_file.original_filename,
+                        extraction_type="error",
+                        payload={},
+                        error=str(exc),
+                    )
+                )
+                continue
             if result.payload:
                 per_file_results.append(result)
 
@@ -1393,6 +1633,18 @@ GLP_STRATEGY = ExtractionStrategy(
     batch_merger=_merge_glp_with_llm,
 )
 
+GLP_V2_STRATEGY = ExtractionStrategy(
+    name="GLP_v2",
+    cross_validation_intro=(
+        "Return the final GLP memorial v2 extraction using only candidate values. "
+        "Prefer shelter and recipient drawings for tanques, quantitative tables for pontos_utilizacao, "
+        "unit schedules for obra.qtd_apartamentos, and explicit pipe callouts for diametros strings."
+    ),
+    text_format=GlpV2LLMExtraction,
+    single_file_extractor=_extract_glp_v2_single_file,
+    batch_merger=_merge_glp_v2_with_llm,
+)
+
 
 def extract_with_llm_result(source_files: list[ExtractedSourceFile]) -> LLMExtractionRunResult:
     if not is_llm_extraction_enabled():
@@ -1446,3 +1698,17 @@ def extract_glp_with_llm_result(
 def extract_glp_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
     """Vision-first extraction for GLP memorial fields only."""
     return extract_glp_with_llm_result(source_files).context
+
+
+def extract_glp_v2_with_llm_result(
+    source_files: list[ExtractedSourceFile],
+) -> LLMExtractionRunResult:
+    if not is_llm_extraction_enabled():
+        logger.debug("GLP v2 LLM extraction disabled, skipping")
+        return LLMExtractionRunResult(context={})
+    return _run_llm_extraction(source_files, GLP_V2_STRATEGY)
+
+
+def extract_glp_v2_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
+    """Vision-first extraction for GLP memorial v2 structured contract."""
+    return extract_glp_v2_with_llm_result(source_files).context

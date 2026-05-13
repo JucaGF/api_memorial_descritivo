@@ -9,10 +9,12 @@ from app.services.memorial_validator import (
     load_eletrico_v1_schema,
     load_gas_natural_v1_schema,
     load_glp_v1_schema,
+    load_glp_v2_schema,
     load_telecom_v1_schema,
     validate_memorial_eletrico_v1_context,
     validate_memorial_gas_natural_v1_context,
     validate_memorial_glp_v1_context,
+    validate_memorial_glp_v2_context,
     validate_memorial_telecom_v1_context,
 )
 
@@ -150,6 +152,116 @@ class MemorialValidatorTests(unittest.TestCase):
         issues = validate_memorial_glp_v1_context(context)
 
         self.assertEqual(issues, [])
+
+    def test_load_glp_v2_schema_returns_expected_contract(self) -> None:
+        schema = load_glp_v2_schema()
+        self.assertEqual(schema["title"], "MemorialGlpContextV2")
+        self.assertIn("pontos_utilizacao", schema["required"])
+
+    def test_validate_memorial_glp_v2_context_accepts_minimal_valid(self) -> None:
+        context = {
+            "documento": {"data_atual": "01/01/2026"},
+            "obra": {
+                "numero_cadastro": "1",
+                "construtora": "X",
+                "nome": "Y",
+                "localizacao": "Z",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": {"valor": 10, "confianca": "high"},
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 1,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 0,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {
+                "fogao": 1,
+                "churrasqueira": 0,
+                "aquecedor": 0,
+                "outros": 0,
+                "total_extraido": None,
+                "total_calculado": 1,
+                "fontes_evidencia": [],
+                "conflitos": [],
+            },
+            "diametros": {
+                "tubulacao_principal": {
+                    "valor": 1.25,
+                    "unidade": "in",
+                    "valor_formatado": '1 1/4"',
+                },
+                "valvula_esfera": {
+                    "valor": 1.25,
+                    "unidade": "in",
+                    "valor_formatado": '1 1/4"',
+                    "inferido": True,
+                },
+            },
+            "ramal": {"primario_material": "aço carbono", "primario_pavimento": "térreo"},
+            "numero": {"prancha": "01/01"},
+            "teto_ou_piso": "piso",
+            "context_version": "glp_v2",
+            "template_version": "glp_v2",
+        }
+        validate_memorial_glp_v2_context(context)
+
+    def test_validate_memorial_glp_v2_context_rejects_bad_version(self) -> None:
+        context = {
+            "documento": {"data_atual": "01/01/2026"},
+            "obra": {
+                "numero_cadastro": "1",
+                "construtora": "X",
+                "nome": "Y",
+                "localizacao": "Z",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": {"valor": 10},
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 1,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 0,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {
+                "fogao": 1,
+                "churrasqueira": 0,
+                "aquecedor": 0,
+                "outros": 0,
+                "total_extraido": None,
+                "total_calculado": 1,
+                "conflitos": [],
+            },
+            "diametros": {
+                "tubulacao_principal": {"valor": 1.25, "unidade": "in", "valor_formatado": '1"'},
+                "valvula_esfera": {"valor": 1.25, "unidade": "in", "valor_formatado": '1"'},
+            },
+            "ramal": {"primario_material": "aço", "primario_pavimento": "térreo"},
+            "numero": {"prancha": "01/01"},
+            "teto_ou_piso": "piso",
+            "context_version": "wrong",
+            "template_version": "glp_v2",
+        }
+        with self.assertRaises(MemorialValidationError):
+            validate_memorial_glp_v2_context(context)
+
+    def test_eletrico_allows_null_tipo_atendimento_when_not_parcial(self) -> None:
+        context = load_fixture()
+        context["nao_inclusos"]["tem_itens"] = any(context["nao_inclusos"].values())
+        context["gerador"]["tem_gerador"] = True
+        context["gerador"]["tipo_atendimento"] = None
+        context["gerador"]["circuitos_atendidos"] = None
+        validate_memorial_eletrico_v1_context(context)
 
 
 if __name__ == "__main__":

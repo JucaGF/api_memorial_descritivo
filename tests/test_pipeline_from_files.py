@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 from pathlib import Path
 from tempfile import mkdtemp
@@ -15,6 +16,7 @@ from app.services.memorial_validator import MemorialValidationError, ValidationI
 from app.services.pipeline import PipelineResult
 from app.services.llm_extractor import LLMExtractionRunResult
 from app.services.pipeline_from_files import (
+    _assemble_glp_v2_payload,
     _build_extraction_report_payload,
     _normalize_gas_natural_context,
     _normalize_glp_context,
@@ -967,7 +969,7 @@ class GenerateFromIngestedFilesTests(unittest.TestCase):
         extract_mock.return_value = extraction_result
         extract_llm_mock.return_value = LLMExtractionRunResult(context={
             "obra": {"construtora": "LLM GLP"},
-            "abastecimento": {"qtd_tanques": 2, "pavimento": "terreo"},
+            "abastecimento": {"qtd_tanques": 1, "pavimento": "terreo"},
             "dimensionamento": {"qtd_fogao": 56, "qtd_aquecedor": 0, "qtd_churrasqueira": 5},
             "soma": {"qtd_pontos_de_utilizacao": 61},
             "ramal": {"primario_diametro": '1 1/4"', "primario_material": "aco carbono", "primario_pavimento": "subsolo"},
@@ -1252,6 +1254,55 @@ class FillGapsTests(unittest.TestCase):
         filled = _fill_gaps(base, supplement)
 
         self.assertEqual(filled, {})
+
+
+class GlpV2AssemblyTests(unittest.TestCase):
+    """MAKAI-style regression shape: 1 tank, 29 apts, 35+35 points, 1 1/4\" pipe (no project name hardcoding)."""
+
+    def test_assemble_matches_expected_fixture_subset(self) -> None:
+        merged = {
+            "obra": {
+                "numero_cadastro": "X",
+                "construtora": "C",
+                "nome": "N",
+                "localizacao": "L",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": 29,
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1, "tipo": "P-190"},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 35,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 35,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {"total_extraido": 70},
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_material": "aço carbono",
+                "primario_pavimento": "térreo",
+            },
+            "numero": {"prancha": "01/04"},
+            "teto_ou_piso": "piso",
+        }
+        out = _assemble_glp_v2_payload(merged, [])
+        fixture_path = ROOT / "tests" / "fixtures" / "glp_v2_makai_expected.json"
+        with fixture_path.open("r", encoding="utf-8") as f:
+            expected = json.load(f)
+        self.assertEqual(out["tanques"]["quantidade"], expected["tanques"]["quantidade"])
+        self.assertEqual(out["obra"]["qtd_apartamentos"]["valor"], expected["obra"]["qtd_apartamentos"]["valor"])
+        self.assertEqual(out["dimensionamento"]["qtd_fogao"], expected["dimensionamento"]["qtd_fogao"])
+        self.assertEqual(out["dimensionamento"]["qtd_churrasqueira"], expected["dimensionamento"]["qtd_churrasqueira"])
+        self.assertEqual(out["pontos_utilizacao"]["total_calculado"], expected["pontos_utilizacao"]["total_calculado"])
+        self.assertEqual(
+            out["diametros"]["tubulacao_principal"]["valor_formatado"],
+            expected["diametros"]["tubulacao_principal"]["valor_formatado"],
+        )
+        self.assertTrue(out["diametros"]["valvula_esfera"].get("inferido"))
 
 
 if __name__ == "__main__":

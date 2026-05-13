@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -776,6 +777,230 @@ class ApiTests(unittest.TestCase):
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
         self.assertTrue(response.content.startswith(b"PK"))
+
+
+class UnifiedErrorEnvelopeTests(unittest.TestCase):
+    """Bug 9 (envelope) — every error response must expose error.{code,request_id,message}."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = TestClient(app)
+
+    def test_upload_invalid_extension_returns_envelope_with_request_id(self) -> None:
+        files = [("files", ("projeto.txt", b"content", "text/plain"))]
+        response = self.client.post(
+            "/api/v1/memoriais/eletrico/upload",
+            files=files,
+            headers={"X-Request-ID": "test-req-1"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("Extensao nao suportada", body["detail"])
+        self.assertIn("error", body)
+        self.assertIn("code", body["error"])
+        self.assertEqual(body["error"]["request_id"], "test-req-1")
+        self.assertEqual(response.headers["X-Request-ID"], "test-req-1")
+
+    def test_upload_empty_list_returns_envelope_with_request_id(self) -> None:
+        response = self.client.post(
+            "/api/v1/memoriais/eletrico/upload",
+            files=[],
+            headers={"X-Request-ID": "test-req-2"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"]["request_id"], "test-req-2")
+        self.assertEqual(body["error"]["code"], "upload_empty")
+
+    def test_unsupported_memorial_type_list_returns_envelope(self) -> None:
+        response = self.client.get(
+            "/api/v1/memoriais",
+            params={"type": "submarino"},
+            headers={"X-Request-ID": "test-req-3"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "unsupported_memorial_type")
+        self.assertEqual(body["error"]["request_id"], "test-req-3")
+        self.assertIn("submarino", body["detail"])
+
+    @patch("app.api.routes.get_generated_memorial")
+    def test_get_missing_memorial_returns_envelope(self, get_mock) -> None:
+        get_mock.return_value = None
+
+        response = self.client.get(
+            "/api/v1/memoriais/inexistente",
+            headers={"X-Request-ID": "test-req-4"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "generated_memorial_not_found")
+        self.assertEqual(body["error"]["request_id"], "test-req-4")
+
+    @patch(
+        "app.api.routes.generate_memorial_eletrico_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_memorial_validation_error_returns_envelope_and_legacy_detail(
+        self,
+        pipeline_mock,
+    ) -> None:
+        pipeline_mock.side_effect = MemorialValidationError(
+            [ValidationIssue(path="$.obra", message="x", validator="required")]
+        )
+
+        files = [("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+        response = self.client.post(
+            "/api/v1/memoriais/eletrico/from-files",
+            files=files,
+            headers={"X-Request-ID": "test-req-5"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("Payload invalido", body["detail"])
+        self.assertEqual(len(body["errors"]), 1)
+        self.assertEqual(body["error"]["code"], "memorial_validation_error")
+        self.assertEqual(body["error"]["request_id"], "test-req-5")
+        self.assertIn("issues", body["error"]["details"])
+
+    @patch("app.api.routes.load_session", return_value=None)
+    def test_missing_review_session_returns_envelope(self, _load_mock) -> None:
+        response = self.client.get(
+            "/api/v1/memoriais/eletrico/sessoes/missing",
+            headers={"X-Request-ID": "test-req-6"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "review_session_not_found")
+        self.assertEqual(body["error"]["request_id"], "test-req-6")
+
+
+class UploadLimitsTests(unittest.TestCase):
+    """Bug 9 — explicit upload limits with distinct error codes per violation."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = TestClient(app)
+
+    @patch.dict(os.environ, {"MAX_FILE_COUNT": "2"}, clear=False)
+    def test_too_many_files_returns_413_with_specific_code(self) -> None:
+        files = [
+            ("files", (f"projeto_{i}.pdf", b"%PDF-1.4 teste", "application/pdf"))
+            for i in range(3)
+        ]
+
+        response = self.client.post("/api/v1/memoriais/eletrico/upload", files=files)
+
+        self.assertEqual(response.status_code, 413)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "upload_too_many_files")
+        self.assertIn("3 arquivos", body["detail"])
+
+    @patch.dict(os.environ, {"MAX_FILE_SIZE_MB": "1"}, clear=False)
+    def test_file_too_large_returns_413_with_specific_code(self) -> None:
+        large_content = b"%PDF-1.4 " + (b"x" * (2 * 1024 * 1024))
+        files = [("files", ("projeto.pdf", large_content, "application/pdf"))]
+
+        response = self.client.post("/api/v1/memoriais/eletrico/upload", files=files)
+
+        self.assertEqual(response.status_code, 413)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "upload_file_too_large")
+        self.assertIn("1MB", body["detail"])
+
+    @patch.dict(
+        os.environ,
+        {
+            "MAX_FILE_COUNT": "10",
+            "MAX_FILE_SIZE_MB": "10",
+            "MAX_TOTAL_UPLOAD_MB": "1",
+        },
+        clear=False,
+    )
+    def test_total_too_large_returns_413_with_specific_code(self) -> None:
+        chunk = b"%PDF-1.4 " + (b"y" * (700 * 1024))
+        files = [
+            ("files", ("p1.pdf", chunk, "application/pdf")),
+            ("files", ("p2.pdf", chunk, "application/pdf")),
+        ]
+
+        response = self.client.post("/api/v1/memoriais/eletrico/upload", files=files)
+
+        self.assertEqual(response.status_code, 413)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "upload_total_too_large")
+        self.assertIn("1MB", body["detail"])
+
+    @patch.dict(os.environ, {"MAX_PDF_PAGES": "2"}, clear=False)
+    def test_pdf_exceeding_page_limit_returns_413(self) -> None:
+        import io
+
+        import fitz
+
+        buffer = io.BytesIO()
+        doc = fitz.open()
+        for _ in range(4):
+            doc.new_page()
+        doc.save(buffer)
+        doc.close()
+        content = buffer.getvalue()
+        files = [("files", ("multi.pdf", content, "application/pdf"))]
+
+        response = self.client.post("/api/v1/memoriais/eletrico/upload", files=files)
+
+        self.assertEqual(response.status_code, 413)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "upload_too_many_pages")
+
+    def test_empty_upload_returns_400_with_upload_empty_code(self) -> None:
+        response = self.client.post("/api/v1/memoriais/eletrico/upload", files=[])
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "upload_empty")
+
+    def test_invalid_extension_returns_400_with_unsupported_extension_code(self) -> None:
+        files = [("files", ("projeto.txt", b"content", "text/plain"))]
+
+        response = self.client.post("/api/v1/memoriais/eletrico/upload", files=files)
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "upload_unsupported_extension")
+
+
+class GlpV2RouteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = TestClient(app)
+
+    @patch("app.api.routes.get_settings")
+    def test_glp_v2_disabled_returns_404(self, get_settings_mock) -> None:
+        get_settings_mock.return_value = MagicMock(glp_v2_enabled=False)
+        response = self.client.post(
+            "/api/v1/memoriais/glp/v2/from-files",
+            files=[("files", ("a.pdf", b"%PDF-1.4 x", "application/pdf"))],
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "glp_v2_disabled")
+
+    @patch("app.api.routes.get_settings")
+    @patch("app.api.routes.GLP_V2_TEMPLATE_PATH")
+    def test_glp_v2_missing_template_returns_503(self, template_path_mock, get_settings_mock) -> None:
+        get_settings_mock.return_value = MagicMock(glp_v2_enabled=True)
+        template_path_mock.is_file.return_value = False
+        response = self.client.post(
+            "/api/v1/memoriais/glp/v2/from-files",
+            files=[("files", ("a.pdf", b"%PDF-1.4 x", "application/pdf"))],
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "glp_v2_template_pending")
 
 
 def _build_pending_session(session_id: str) -> ReviewSession:

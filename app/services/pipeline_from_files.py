@@ -7,17 +7,20 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from app.services.context_builder import merge_context
+from app.services.context_builder import build_memorial_glp_v2_context, merge_context
+from app.services.diameter_normalizer import normalize_diameter
 from app.services.extraction_mapper import (
     ExtractionReport,
     MappingResult,
     assess_extraction_coverage,
     assess_gas_natural_extraction_coverage,
     assess_glp_extraction_coverage,
+    assess_glp_v2_extraction_coverage,
     assess_telecom_extraction_coverage,
     map_extraction_to_partial_context,
     map_extraction_to_partial_gas_natural_context,
     map_extraction_to_partial_glp_context,
+    map_extraction_to_partial_glp_v2_context,
     map_extraction_to_partial_telecom_context,
 )
 from app.services.file_ingestion import (
@@ -28,6 +31,7 @@ from app.services.file_ingestion import (
 )
 from app.services.llm_extractor import (
     extract_gas_natural_with_llm_result,
+    extract_glp_v2_with_llm_result,
     extract_glp_with_llm_result,
     extract_telecom_with_llm_result,
     extract_with_llm_result,
@@ -39,12 +43,14 @@ from app.services.pipeline import (
     generate_memorial_eletrico_v1,
     generate_memorial_gas_natural_v1,
     generate_memorial_glp_v1,
+    generate_memorial_glp_v2,
     generate_memorial_telecom_v1,
 )
 from app.services.project_extractor import ProjectExtractionError, extract_project_files
 
 logger = logging.getLogger(__name__)
 _GLP_CONFLICTS_KEY = "_glp_total_points_conflicts"
+_GLP_V2_CRITICAL = "_glp_v2_critical_conflicts"
 _GLP_AUTHORITATIVE_TOTAL_KEY = "_glp_authoritative_total_points"
 _GLP_DIMENSIONAMENTO_FIELDS = ("qtd_fogao", "qtd_aquecedor", "qtd_churrasqueira")
 
@@ -681,6 +687,289 @@ def generate_memorial_glp_v1_from_ingested_files(
             issues=error.issues,
             extraction_report=_build_extraction_report_payload(report, conflicts),
         ) from error
+
+
+def _glp_v2_diameter_from_raw(raw: str | None, regra: str) -> dict[str, Any] | None:
+    if not raw or not isinstance(raw, str):
+        return None
+    nd = normalize_diameter(raw.strip())
+    if not nd:
+        return None
+    return {
+        "valor": float(nd.valor),
+        "unidade": nd.unidade,
+        "valor_formatado": nd.valor_formatado,
+        "valor_original": nd.valor_original,
+        "fonte_evidencia": [{"regra": regra, "texto": nd.valor_original, "confianca": "medium"}],
+    }
+
+
+def _glp_v2_coalesce_diameter(
+    structured: Any,
+    raw: str | None,
+    regra: str,
+) -> dict[str, Any] | None:
+    if isinstance(structured, dict):
+        v = structured.get("valor")
+        if isinstance(v, (int, float)):
+            return structured
+    return _glp_v2_diameter_from_raw(raw, regra)
+
+
+def _assemble_glp_v2_payload(
+    merged: dict[str, Any],
+    mapper_critical: list[dict[str, Any]],
+) -> dict[str, Any]:
+    work = dict(merged)
+    work.pop(_GLP_V2_CRITICAL, None)
+
+    obra = dict(work.get("obra") or {})
+    qtd_ap = obra.get("qtd_apartamentos")
+    if isinstance(qtd_ap, int) and not isinstance(qtd_ap, bool):
+        obra["qtd_apartamentos"] = {
+            "valor": qtd_ap,
+            "fonte_evidencia": [],
+            "confianca": "medium",
+        }
+    elif isinstance(qtd_ap, dict) and "valor" in qtd_ap:
+        qv = qtd_ap["valor"]
+        obra["qtd_apartamentos"] = {
+            "valor": int(qv),
+            "fonte_evidencia": list(qtd_ap.get("fonte_evidencia") or []),
+            "confianca": str(qtd_ap.get("confianca") or "medium"),
+        }
+    else:
+        obra["qtd_apartamentos"] = {"valor": 0, "fonte_evidencia": [], "confianca": "low"}
+
+    tanques_in = work.get("tanques") or {}
+    if not isinstance(tanques_in, dict):
+        tanques_in = {}
+    tanques: dict[str, Any] = {
+        "quantidade": int(tanques_in.get("quantidade") or 0),
+        "fonte_evidencia": list(tanques_in.get("fonte_evidencia") or []),
+        "conflitos": list(tanques_in.get("conflitos") or []),
+    }
+    if tanques_in.get("tipo"):
+        tanques["tipo"] = tanques_in["tipo"]
+    if tanques_in.get("capacidade_kg") is not None:
+        tanques["capacidade_kg"] = float(tanques_in["capacidade_kg"])
+    if tanques_in.get("qtd_abrigos") is not None:
+        tanques["qtd_abrigos"] = int(tanques_in["qtd_abrigos"])
+
+    ab_raw = work.get("abastecimento") or {}
+    if not isinstance(ab_raw, dict):
+        ab_raw = {}
+    pav = ab_raw.get("pavimento")
+    abastecimento: dict[str, Any] = {
+        "pavimento": str(pav if pav is not None else "térreo"),
+    }
+    if ab_raw.get("fonte_evidencia"):
+        abastecimento["fonte_evidencia"] = ab_raw["fonte_evidencia"]
+
+    dim = work.get("dimensionamento") or {}
+    if not isinstance(dim, dict):
+        dim = {}
+    dimensionamento = {
+        "qtd_fogao": int(dim.get("qtd_fogao") or 0),
+        "qtd_aquecedor": int(dim.get("qtd_aquecedor") or 0),
+        "qtd_churrasqueira": int(dim.get("qtd_churrasqueira") or 0),
+        "qtd_outros": int(dim.get("qtd_outros") or 0),
+    }
+
+    pu_in = work.get("pontos_utilizacao") or {}
+    if not isinstance(pu_in, dict):
+        pu_in = {}
+    fog = pu_in.get("fogao")
+    if fog is None:
+        fog = dimensionamento["qtd_fogao"]
+    ch = pu_in.get("churrasqueira")
+    if ch is None:
+        ch = dimensionamento["qtd_churrasqueira"]
+    aq = pu_in.get("aquecedor")
+    if aq is None:
+        aq = dimensionamento["qtd_aquecedor"]
+    outros = pu_in.get("outros")
+    if outros is None:
+        outros = dimensionamento["qtd_outros"]
+
+    fog_i, ch_i, aq_i, ou_i = int(fog or 0), int(ch or 0), int(aq or 0), int(outros or 0)
+    total_calc = fog_i + ch_i + aq_i + ou_i
+
+    pu_conflicts: list[dict[str, Any]] = [
+        dict(c) for c in (pu_in.get("conflitos") or []) if isinstance(c, dict)
+    ]
+    for mc in mapper_critical:
+        pu_conflicts.append(dict(mc))
+
+    total_ext = pu_in.get("total_extraido")
+    if total_ext is not None and int(total_ext) != total_calc:
+        pu_conflicts.append({
+            "tipo": "glp_v2_points_total_mismatch",
+            "status": "unresolved",
+            "valores_observados": [total_ext, total_calc],
+            "fontes": ["total_extraido", "total_calculado"],
+            "mensagem": "Total extraido difere da soma por tipo.",
+        })
+
+    pontos_utilizacao: dict[str, Any] = {
+        "fogao": fog_i,
+        "churrasqueira": ch_i,
+        "aquecedor": aq_i,
+        "outros": ou_i,
+        "total_extraido": total_ext,
+        "total_calculado": total_calc,
+        "fontes_evidencia": list(pu_in.get("fontes_evidencia") or []),
+        "conflitos": pu_conflicts,
+    }
+
+    d_llm = work.get("diametros") or {}
+    if not isinstance(d_llm, dict):
+        d_llm = {}
+    ramal = work.get("ramal") or {}
+    if not isinstance(ramal, dict):
+        ramal = {}
+
+    tp = d_llm.get("tubulacao_principal")
+    raw_main = None
+    if isinstance(ramal.get("primario_diametro"), str):
+        raw_main = ramal["primario_diametro"]
+    if isinstance(tp, str):
+        raw_main = tp
+    struct_main = tp if isinstance(tp, dict) else None
+
+    main = _glp_v2_coalesce_diameter(struct_main, raw_main, "glp_v2_tubulacao")
+
+    vp = d_llm.get("valvula_esfera")
+    raw_valve = vp if isinstance(vp, str) else None
+    struct_valve = vp if isinstance(vp, dict) else None
+    valve = _glp_v2_coalesce_diameter(struct_valve, raw_valve, "glp_v2_valvula")
+
+    if main is None:
+        raise MemorialValidationError(
+            issues=[
+                ValidationIssue(
+                    path="$.diametros.tubulacao_principal",
+                    message="Diametro da tubulacao principal ausente apos extracao.",
+                    validator="glp_v2_diameter",
+                )
+            ],
+            extraction_report=None,
+        )
+
+    if valve is None:
+        valve = {**main, "inferido": True}
+
+    ramal_out = {
+        "primario_material": str(ramal.get("primario_material") or "não especificado"),
+        "primario_pavimento": str(ramal.get("primario_pavimento") or "térreo"),
+    }
+
+    numero = work.get("numero") or {}
+    if not isinstance(numero, dict):
+        numero = {}
+    numero_out = {"prancha": str(numero.get("prancha") or "01/01")}
+
+    teto = work.get("teto_ou_piso")
+    if not teto:
+        teto = "piso"
+
+    return {
+        "obra": obra,
+        "tanques": tanques,
+        "abastecimento": abastecimento,
+        "dimensionamento": dimensionamento,
+        "pontos_utilizacao": pontos_utilizacao,
+        "diametros": {"tubulacao_principal": main, "valvula_esfera": valve},
+        "ramal": ramal_out,
+        "numero": numero_out,
+        "teto_ou_piso": str(teto),
+    }
+
+
+def extract_glp_v2_mapping_from_ingested_files(
+    files: list[IngestedFileMetadata],
+) -> tuple[MappingResult, ExtractionReport]:
+    if not is_llm_extraction_enabled():
+        raise ProjectExtractionError(
+            "Geracao do memorial GLP v2 a partir de arquivos requer extracao LLM habilitada "
+            "(defina USE_LLM_EXTRACTION)."
+        )
+
+    extraction_result = extract_project_files(files)
+    llm_result = extract_glp_v2_with_llm_result(extraction_result.source_files)
+    llm_context = llm_result.context
+
+    mapper_mapping = map_extraction_to_partial_glp_v2_context(extraction_result)
+    mapper_ctx = dict(mapper_mapping.context)
+    critical = list(mapper_ctx.pop(_GLP_V2_CRITICAL, []) or [])
+
+    gap_fills = _fill_gaps(llm_context, mapper_ctx)
+    merged = merge_context(llm_context, gap_fills) if gap_fills else llm_context
+
+    merged = _normalize_glp_non_total_fields(merged)
+
+    assess_ctx = MappingResult(context=dict(merged), evidence=mapper_mapping.evidence)
+    report = assess_glp_v2_extraction_coverage(assess_ctx)
+    report = _attach_cross_validation_report(report, llm_result.cross_validation)
+
+    assembled = _assemble_glp_v2_payload(merged, critical)
+    mapping = MappingResult(context=assembled, evidence=mapper_mapping.evidence)
+    logger.info(
+        "GLP v2 extraction coverage: filled=%d, missing=%d, pending=%d",
+        len(report.filled), len(report.missing), len(report.pending),
+    )
+    return mapping, report
+
+
+def generate_memorial_glp_v2_from_ingested_files(
+    files: list[IngestedFileMetadata],
+    output_path: Path,
+) -> PipelineResult:
+    mapping, report = extract_glp_v2_mapping_from_ingested_files(files)
+    context_payload = mapping.context
+
+    unresolved = [
+        c for c in context_payload.get("pontos_utilizacao", {}).get("conflitos", [])
+        if isinstance(c, dict) and c.get("status") == "unresolved"
+    ]
+    if unresolved:
+        raise MemorialValidationError(
+            issues=[
+                ValidationIssue(
+                    path="$.pontos_utilizacao.conflitos",
+                    message="Conflitos criticos GLP v2 sem resolucao.",
+                    validator="glp_v2_conflict",
+                )
+            ],
+            extraction_report=_build_extraction_report_payload(report, unresolved),
+        )
+
+    try:
+        result = generate_memorial_glp_v2(context_payload, output_path)
+        return PipelineResult(
+            context=result.context,
+            output_path=result.output_path,
+            extraction_report=report,
+        )
+    except MemorialValidationError as error:
+        raise MemorialValidationError(
+            issues=error.issues,
+            extraction_report=_build_extraction_report_payload(report, None),
+        ) from error
+
+
+async def generate_memorial_glp_v2_from_uploaded_files(
+    files: list[UploadedFile],
+    output_path: Path,
+) -> PipelineResult:
+    ingestion_result = await ingest_uploaded_files(files)
+    try:
+        return generate_memorial_glp_v2_from_ingested_files(
+            ingestion_result.files,
+            output_path,
+        )
+    finally:
+        cleanup_ingestion_result(ingestion_result)
 
 
 async def generate_memorial_glp_v1_from_uploaded_files(

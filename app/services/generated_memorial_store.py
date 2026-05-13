@@ -22,6 +22,7 @@ _FILENAME_BY_TYPE = {
     "telecom": "memorial_telecom_v1.docx",
     "gas-natural": "memorial_gas_natural_v1.docx",
     "glp": "memorial_glp_v1.docx",
+    "glp_v2": "memorial_glp_v2.docx",
 }
 
 
@@ -143,25 +144,31 @@ def _response_from_record(
     record: dict[str, Any],
     *,
     include_download_url: bool = True,
+    include_context: bool = False,
 ) -> GeneratedMemorialResponse:
     download_url = (
         create_signed_download_url(record)
         if include_download_url and record.get("status") == STATUS_READY
         else ""
     )
-    return GeneratedMemorialResponse.model_validate(
-        {
-            "id": str(record["id"]),
-            "type": record["type"],
-            "project_name": record["project_name"],
-            "status": record["status"],
-            "observations": record.get("observations"),
-            "pdf_filenames": record.get("pdf_filenames") or [],
-            "created_at": record["created_at"],
-            "updated_at": record["updated_at"],
-            "download_url": download_url,
-        }
-    )
+    payload: dict[str, Any] = {
+        "id": str(record["id"]),
+        "type": record["type"],
+        "project_name": record["project_name"],
+        "status": record["status"],
+        "observations": record.get("observations"),
+        "pdf_filenames": record.get("pdf_filenames") or [],
+        "created_at": record["created_at"],
+        "updated_at": record["updated_at"],
+        "download_url": download_url,
+        "context_version": record.get("context_version"),
+        "template_version": record.get("template_version"),
+    }
+    if include_context:
+        payload["final_context"] = record.get("final_context")
+        payload["extraction_report"] = record.get("extraction_report")
+        payload["conflicts"] = record.get("conflicts") or []
+    return GeneratedMemorialResponse.model_validate(payload)
 
 
 def create_generated_memorial(
@@ -171,13 +178,18 @@ def create_generated_memorial(
     output_path: Path,
     pdf_filenames: list[str],
     observations: str | None = None,
+    final_context: dict[str, Any] | None = None,
+    extraction_report: dict[str, Any] | None = None,
+    conflicts: list[dict[str, Any]] | None = None,
+    context_version: str | None = None,
+    template_version: str | None = None,
 ) -> GeneratedMemorialResponse:
     memorial_id = str(uuid.uuid4())
     storage_settings = _storage_settings()
     storage_path = _expected_storage_path(memorial_type, memorial_id)
     now = datetime.now(tz=timezone.utc).isoformat()
 
-    record = {
+    record: dict[str, Any] = {
         "id": memorial_id,
         "type": memorial_type,
         "project_name": project_name,
@@ -188,6 +200,11 @@ def create_generated_memorial(
         "storage_path": storage_path,
         "created_at": now,
         "updated_at": now,
+        "final_context": final_context,
+        "extraction_report": extraction_report,
+        "conflicts": conflicts if conflicts is not None else [],
+        "context_version": context_version,
+        "template_version": template_version,
     }
     _client().table(GENERATED_MEMORIALS_TABLE).insert(record).execute()
 
@@ -225,7 +242,7 @@ def create_generated_memorial(
             "Falha ao persistir memorial gerado."
         ) from error
 
-    return _response_from_record({**record, "status": STATUS_READY})
+    return _response_from_record({**record, "status": STATUS_READY}, include_context=False)
 
 
 def list_generated_memorials(memorial_type: str | None = None) -> list[GeneratedMemorialResponse]:
@@ -235,7 +252,7 @@ def list_generated_memorials(memorial_type: str | None = None) -> list[Generated
     else:
         response = query.execute()
     return [
-        _response_from_record(record, include_download_url=False)
+        _response_from_record(record, include_download_url=False, include_context=False)
         for record in (response.data or [])
     ]
 
@@ -253,11 +270,15 @@ def get_generated_memorial_record(memorial_id: str) -> dict[str, Any] | None:
     return response.data[0]
 
 
-def get_generated_memorial(memorial_id: str) -> GeneratedMemorialResponse | None:
+def get_generated_memorial(
+    memorial_id: str,
+    *,
+    include_context: bool = False,
+) -> GeneratedMemorialResponse | None:
     record = get_generated_memorial_record(memorial_id)
     if record is None:
         return None
-    return _response_from_record(record)
+    return _response_from_record(record, include_context=include_context)
 
 
 def delete_generated_memorial(memorial_id: str) -> bool:

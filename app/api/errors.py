@@ -68,6 +68,65 @@ def build_internal_server_error_response(request: Request) -> JSONResponse:
     )
 
 
+def build_memorial_validation_error_response(
+    *,
+    request: Request | None,
+    detail: str,
+    issues: list[dict[str, Any]],
+    extraction_report: Any | None = None,
+) -> JSONResponse:
+    """Memorial validation error envelope.
+
+    Preserves the legacy fields (`detail`, `errors`, optional `extraction_report`)
+    used by existing clients while also exposing the unified `error` object with
+    `code="memorial_validation_error"` and `request_id`. Both shapes can be read
+    simultaneously without breaking the older contract.
+    """
+    request_id = get_request_id(request)
+    error: dict[str, Any] = {
+        "code": "memorial_validation_error",
+        "message": detail,
+    }
+    if request_id is not None:
+        error["request_id"] = request_id
+    error["details"] = {"issues": issues}
+    if extraction_report is not None:
+        error["details"]["extraction_report"] = extraction_report
+
+    content: dict[str, Any] = {
+        "detail": detail,
+        "errors": issues,
+        "error": error,
+    }
+    if extraction_report is not None:
+        content["extraction_report"] = extraction_report
+
+    response = JSONResponse(status_code=400, content=content)
+    if request_id is not None:
+        response.headers[REQUEST_ID_HEADER] = request_id
+    return response
+
+
+def build_client_error_response(
+    *,
+    request: Request | None,
+    status_code: int,
+    code: str,
+    message: str,
+    detail: str | None = None,
+    details: Any | None = None,
+) -> JSONResponse:
+    """Standard client error (400/404/409/etc.) with request_id."""
+    return build_error_response(
+        status_code=status_code,
+        code=code,
+        message=message,
+        request_id=get_request_id(request),
+        detail=detail,
+        details=details,
+    )
+
+
 def sanitize_text(value: str) -> str:
     sanitized = value
     for env_name in _SECRET_ENV_NAMES:

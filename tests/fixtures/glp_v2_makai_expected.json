@@ -1,0 +1,18 @@
+{
+  "tanques": {"quantidade": 1},
+  "obra": {
+    "qtd_apartamentos": {"valor": 29}
+  },
+  "dimensionamento": {
+    "qtd_fogao": 35,
+    "qtd_churrasqueira": 35
+  },
+  "pontos_utilizacao": {
+    "total_calculado": 70
+  },
+  "diametros": {
+    "tubulacao_principal": {
+      "valor_formatado": "1 1/4\""
+    }
+  }
+}

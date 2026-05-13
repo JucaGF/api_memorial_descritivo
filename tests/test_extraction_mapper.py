@@ -11,6 +11,7 @@ from app.services.extraction_mapper import (
     assess_telecom_extraction_coverage,
     map_extraction_to_partial_context,
     map_extraction_to_partial_gas_natural_context,
+    map_extraction_to_partial_glp_v2_context,
     map_extraction_to_partial_telecom_context,
 )
 from app.services.project_extractor import ExtractedSourceFile, ProjectExtractionResult
@@ -509,6 +510,50 @@ class GasNaturalExtractionMapperTests(unittest.TestCase):
         self.assertEqual(context["valvula"]["esfera_diametro"], "32 mm")
         self.assertEqual(context["numero"]["prancha"], "04/04")
         self.assertEqual(context["teto_ou_piso"], "teto")
+
+
+class TemGeradorHeuristicTests(unittest.TestCase):
+    def test_gen_legend_without_q_board_is_not_a_generator(self) -> None:
+        from app.services.extraction_mapper import _extract_tem_gerador
+
+        text = "Legenda: simbolo de gerador segundo ABNT NBR 5410"
+        ext = _extract_tem_gerador(text)
+        self.assertIsNotNone(ext)
+        self.assertIs(ext.value, False)
+
+    def test_q_ger_panel_snippet_implies_generator(self) -> None:
+        from app.services.extraction_mapper import _extract_tem_gerador
+
+        text = "Painel Q-GER-01 alimenta cargas essenciais no diagrama."
+        ext = _extract_tem_gerador(text)
+        self.assertIsNotNone(ext)
+        self.assertIs(ext.value, True)
+
+    def test_q_board_without_atendimento_keywords_yields_null_tipo(self) -> None:
+        from app.services.extraction_mapper import _extract_gerador_tipo_atendimento
+
+        text = "Q-GER-01 sem listagem de unidades habitacionais"
+        self.assertIsNone(_extract_gerador_tipo_atendimento(text))
+
+
+class GlpV2MapperTests(unittest.TestCase):
+    def test_map_fills_main_diameter_near_ramal_keyword(self) -> None:
+        raw = """
+        Ramal primário em aço carbono com tubo 1 1/4" até o abrigo GLP.
+        """
+        result = map_extraction_to_partial_glp_v2_context(build_extraction_result(raw))
+        diam = result.context.get("diametros", {}).get("tubulacao_principal")
+        self.assertIsInstance(diam, dict)
+        self.assertEqual(diam["unidade"], "in")
+
+    def test_critical_conflict_when_fogao_equals_apartments_regex(self) -> None:
+        raw = """
+        Empreendimento com 29 apartamentos.
+        Foram previstos 29 fogões.
+        """
+        result = map_extraction_to_partial_glp_v2_context(build_extraction_result(raw))
+        conflicts = result.context.get("_glp_v2_critical_conflicts", [])
+        self.assertTrue(any(c.get("tipo") == "glp_v2_fogao_apartamentos_colision" for c in conflicts))
 
 
 if __name__ == "__main__":

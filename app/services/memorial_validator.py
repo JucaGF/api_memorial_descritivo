@@ -12,6 +12,7 @@ ELETRICO_V1_SCHEMA_PATH = ROOT_DIR / "templates" / "eletrico" / "v1" / "schema.j
 TELECOM_V1_SCHEMA_PATH = ROOT_DIR / "templates" / "telecom" / "v1" / "schema.json"
 GAS_NATURAL_V1_SCHEMA_PATH = ROOT_DIR / "templates" / "gas_natural" / "v1" / "schema.json"
 GLP_V1_SCHEMA_PATH = ROOT_DIR / "templates" / "glp" / "v1" / "schema.json"
+GLP_V2_SCHEMA_PATH = ROOT_DIR / "templates" / "glp" / "v2" / "schema.json"
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,33 @@ def validate_memorial_glp_v1_context(
     from jsonschema import Draft202012Validator
 
     schema = load_glp_v1_schema()
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(context), key=lambda error: list(error.absolute_path))
+    issues = [
+        ValidationIssue(
+            path=_format_error_path(error),
+            message=error.message,
+            validator=error.validator,
+        )
+        for error in errors
+    ]
+    if issues:
+        raise MemorialValidationError(issues)
+    return issues
+
+
+def load_glp_v2_schema() -> dict[str, Any]:
+    with GLP_V2_SCHEMA_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def validate_memorial_glp_v2_context(
+    context: dict[str, Any],
+) -> list[ValidationIssue]:
+    _require_jsonschema_dependency()
+    from jsonschema import Draft202012Validator
+
+    schema = load_glp_v2_schema()
     validator = Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(context), key=lambda error: list(error.absolute_path))
     issues = [
