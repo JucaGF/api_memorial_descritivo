@@ -89,7 +89,7 @@
         "qtd_tanques": {
           "type": "integer",
           "minimum": 1,
-          "description": "Quantidade de tanques GLP tipo P-190"
+          "description": "Quantidade de abrigos de gás GLP do empreendimento (NÃO confundir com a quantidade de recipientes P-190 internos: um abrigo pode conter múltiplos P-190 e ainda assim este campo é 1). O nome do campo é histórico; a semântica correta é 'número de abrigos'."
         },
         "pavimento": {
           "type": "string",

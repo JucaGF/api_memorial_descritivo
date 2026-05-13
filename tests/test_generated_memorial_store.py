@@ -207,6 +207,105 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
         self._mock_client.storage.from_.return_value.remove.assert_not_called()
         self._table().delete.assert_not_called()
 
+    def test_create_generated_memorial_persists_final_context_and_versions(self) -> None:
+        self._mock_client.storage.from_.return_value.upload.return_value = _mock_response([])
+        self._table().insert.return_value.execute.return_value = _mock_response([])
+        self._table().update.return_value.eq.return_value.execute.return_value = _mock_response([])
+        self._mock_client.storage.from_.return_value.create_signed_url.return_value = {
+            "signedURL": "https://signed.example/download"
+        }
+
+        with NamedTemporaryFile(suffix=".docx", delete=False) as temp_file:
+            temp_path = Path(temp_file.name)
+        try:
+            temp_path.write_bytes(b"PK\x03\x04docx")
+            store.create_generated_memorial(
+                memorial_type="glp",
+                project_name="Memorial GLP",
+                output_path=temp_path,
+                pdf_filenames=["projeto.pdf"],
+                observations=None,
+                final_context={"obra": {"nome": "Edif Exemplo"}, "abastecimento": {"qtd_tanques": 1}},
+                extraction_report={"filled": ["obra.nome"], "missing": [], "pending": []},
+                conflicts=[{"type": "demo", "status": "resolved"}],
+                context_version="glp_v1",
+                template_version="glp_v1",
+            )
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+        inserted = self._table().insert.call_args[0][0]
+        self.assertEqual(inserted["context_version"], "glp_v1")
+        self.assertEqual(inserted["template_version"], "glp_v1")
+        self.assertEqual(inserted["final_context"]["obra"]["nome"], "Edif Exemplo")
+        self.assertEqual(inserted["final_context"]["abastecimento"]["qtd_tanques"], 1)
+        self.assertEqual(inserted["extraction_report"]["filled"], ["obra.nome"])
+        self.assertEqual(inserted["conflicts"], [{"type": "demo", "status": "resolved"}])
+
+    def test_list_generated_memorials_omits_final_context_for_payload_size(self) -> None:
+        record = _record(memorial_type="glp")
+        record["final_context"] = {"obra": {"nome": "X"}}
+        record["extraction_report"] = {"filled": []}
+        record["conflicts"] = [{"type": "demo"}]
+        record["context_version"] = "glp_v1"
+        record["template_version"] = "glp_v1"
+        self._table().select.return_value.order.return_value.execute.return_value = (
+            _mock_response([record])
+        )
+
+        result = store.list_generated_memorials()
+
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(result[0].final_context)
+        self.assertIsNone(result[0].extraction_report)
+        self.assertIsNone(result[0].conflicts)
+        self.assertEqual(result[0].context_version, "glp_v1")
+        self.assertEqual(result[0].template_version, "glp_v1")
+
+    def test_get_generated_memorial_with_include_context_returns_final_context(self) -> None:
+        record = _record(memorial_type="glp")
+        record["final_context"] = {"obra": {"nome": "Edif Y"}}
+        record["extraction_report"] = {"filled": ["obra.nome"]}
+        record["conflicts"] = []
+        record["context_version"] = "glp_v1"
+        record["template_version"] = "glp_v1"
+        self._table().select.return_value.eq.return_value.execute.return_value = (
+            _mock_response([record])
+        )
+        self._mock_client.storage.from_.return_value.create_signed_url.return_value = {
+            "signedURL": "https://signed.example/download"
+        }
+
+        result = store.get_generated_memorial("abc-123", include_context=True)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.final_context, {"obra": {"nome": "Edif Y"}})
+        self.assertEqual(result.extraction_report, {"filled": ["obra.nome"]})
+        self.assertEqual(result.conflicts, [])
+        self.assertEqual(result.context_version, "glp_v1")
+
+    def test_get_generated_memorial_default_omits_context(self) -> None:
+        record = _record(memorial_type="glp")
+        record["final_context"] = {"obra": {"nome": "Edif Y"}}
+        record["extraction_report"] = {"filled": ["obra.nome"]}
+        record["conflicts"] = []
+        record["context_version"] = "glp_v1"
+        record["template_version"] = "glp_v1"
+        self._table().select.return_value.eq.return_value.execute.return_value = (
+            _mock_response([record])
+        )
+        self._mock_client.storage.from_.return_value.create_signed_url.return_value = {
+            "signedURL": "https://signed.example/download"
+        }
+
+        result = store.get_generated_memorial("abc-123")
+
+        self.assertIsNotNone(result)
+        self.assertIsNone(result.final_context)
+        self.assertIsNone(result.extraction_report)
+        self.assertIsNone(result.conflicts)
+        self.assertEqual(result.context_version, "glp_v1")
+
 
 if __name__ == "__main__":
     unittest.main()

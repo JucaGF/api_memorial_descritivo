@@ -32,6 +32,21 @@ class GeneratedMemorialStorageSettings:
 
 
 @dataclass(frozen=True)
+class UploadLimits:
+    """Hard limits enforced at ingestion time.
+
+    These caps prevent large uploads from silently failing inside the pipeline
+    (PDF parsing, OCR, LLM extraction) with generic 500/timeouts. Each violation
+    produces a distinct error code so the frontend can show specific messages
+    instead of a generic connection error.
+    """
+    max_file_count: int
+    max_file_size_mb: int
+    max_total_upload_mb: int
+    max_pdf_pages: int
+
+
+@dataclass(frozen=True)
 class AppSettings:
     app_env: AppEnvironment
     cors_allowed_origins: list[str]
@@ -43,6 +58,15 @@ class AppSettings:
             supabase_key="",
         )
     )
+    upload_limits: UploadLimits = field(
+        default_factory=lambda: UploadLimits(
+            max_file_count=10,
+            max_file_size_mb=50,
+            max_total_upload_mb=200,
+            max_pdf_pages=100,
+        )
+    )
+    glp_v2_enabled: bool = False
 
     @property
     def readiness_configuration_status(self) -> str:
@@ -111,6 +135,28 @@ def get_settings() -> AppSettings:
     if not generated_memorials_bucket:
         generated_memorials_bucket = "generated-memorials"
 
+    upload_limits = UploadLimits(
+        max_file_count=_parse_positive_int(
+            os.getenv("MAX_FILE_COUNT"), "MAX_FILE_COUNT", 10
+        ),
+        max_file_size_mb=_parse_positive_int(
+            os.getenv("MAX_FILE_SIZE_MB"), "MAX_FILE_SIZE_MB", 50
+        ),
+        max_total_upload_mb=_parse_positive_int(
+            os.getenv("MAX_TOTAL_UPLOAD_MB"), "MAX_TOTAL_UPLOAD_MB", 200
+        ),
+        max_pdf_pages=_parse_positive_int(
+            os.getenv("MAX_PDF_PAGES"), "MAX_PDF_PAGES", 100
+        ),
+    )
+
+    glp_v2_enabled = os.getenv("GLP_V2_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
     return AppSettings(
         app_env=app_env,
         cors_allowed_origins=cors_allowed_origins,
@@ -120,4 +166,6 @@ def get_settings() -> AppSettings:
             supabase_url=supabase_url,
             supabase_key=supabase_key,
         ),
+        upload_limits=upload_limits,
+        glp_v2_enabled=glp_v2_enabled,
     )

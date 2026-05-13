@@ -187,23 +187,84 @@
         "tipo_atendimento"
       ],
       "properties": {
+        "tem_gerador": {
+          "type": "boolean",
+          "description": "Opcional: se ausente, preserva comportamento legado (assimile presença de gerador a partir de qtd > 0 no context_builder)."
+        },
         "qtd": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 0
         },
         "potencia_kva": {
           "type": "number",
           "minimum": 0
         },
         "tipo_atendimento": {
-          "type": "string",
-          "enum": ["edificio", "condominio", "parcial"]
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": ["edificio", "condominio", "parcial"]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Pode ser null quando o diagrama mostra painel Q-GER mas o texto de atendimento é inconclusivo."
         },
         "circuitos_atendidos": {
           "type": ["string", "null"]
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tem_gerador": {
+                "const": false
+              }
+            },
+            "required": ["tem_gerador"]
+          },
+          "then": {
+            "properties": {
+              "qtd": {
+                "const": 0
+              },
+              "potencia_kva": {
+                "const": 0
+              },
+              "tipo_atendimento": {
+                "enum": ["edificio", "condominio", "parcial"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "not": {
+                  "required": ["tem_gerador"]
+                }
+              },
+              {
+                "properties": {
+                  "tem_gerador": {
+                    "const": true
+                  }
+                },
+                "required": ["tem_gerador"]
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "qtd": {
+                "minimum": 1
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {

@@ -133,6 +133,52 @@ class AppConfigTests(unittest.TestCase):
             "http://localhost:5173",
         )
 
+    def test_upload_limits_have_safe_defaults(self) -> None:
+        with patch.dict(os.environ, _base_env(), clear=False):
+            from app.config import get_settings
+
+            settings = get_settings()
+
+        self.assertEqual(settings.upload_limits.max_file_count, 10)
+        self.assertEqual(settings.upload_limits.max_file_size_mb, 50)
+        self.assertEqual(settings.upload_limits.max_total_upload_mb, 200)
+        self.assertEqual(settings.upload_limits.max_pdf_pages, 100)
+
+    def test_upload_limits_can_be_overridden_via_env(self) -> None:
+        env = {
+            **_base_env(),
+            "MAX_FILE_COUNT": "25",
+            "MAX_FILE_SIZE_MB": "100",
+            "MAX_TOTAL_UPLOAD_MB": "500",
+            "MAX_PDF_PAGES": "300",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            from app.config import get_settings
+
+            settings = get_settings()
+
+        self.assertEqual(settings.upload_limits.max_file_count, 25)
+        self.assertEqual(settings.upload_limits.max_file_size_mb, 100)
+        self.assertEqual(settings.upload_limits.max_total_upload_mb, 500)
+        self.assertEqual(settings.upload_limits.max_pdf_pages, 300)
+
+    def test_glp_v2_enabled_parses_truthy_env(self) -> None:
+        with patch.dict(os.environ, {**_base_env(), "GLP_V2_ENABLED": "true"}, clear=False):
+            from app.config import get_settings
+
+            self.assertTrue(get_settings().glp_v2_enabled)
+
+    def test_invalid_upload_limit_raises_configuration_error(self) -> None:
+        with patch.dict(
+            os.environ,
+            {**_base_env(), "MAX_FILE_COUNT": "-1"},
+            clear=False,
+        ):
+            from app.config import ConfigurationError, get_settings
+
+            with self.assertRaises(ConfigurationError):
+                get_settings()
+
     def test_cors_does_not_allow_unconfigured_origin(self) -> None:
         from app.config import AppEnvironment, AppSettings
         from app.main import create_app

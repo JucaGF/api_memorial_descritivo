@@ -5,6 +5,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services.diameter_normalizer import normalize_diameter
 from app.services.project_extractor import ProjectExtractionResult
 
 
@@ -25,6 +26,7 @@ EXTRACTABLE_BY_MAPPER = (
     "mt.tensao_kv",
     "mt.secao_cabo_mm2",
     "instalacao.perfilado_tipo",
+    "gerador.tem_gerador",
     "gerador.tipo_atendimento",
     "nao_inclusos.cpct",
     "nao_inclusos.cftv",
@@ -99,6 +101,11 @@ GLP_PENDING_EXTRACTION = (
     "ramal.primario_pavimento",
     "numero.prancha",
     "teto_ou_piso",
+)
+
+GLP_V2_EXTRACTABLE_BY_MAPPER = GLP_EXTRACTABLE_BY_MAPPER + (
+    "diametros.tubulacao_principal",
+    "diametros.valvula_esfera",
 )
 
 # Campos extraíveis identificados nos projetos reais, ainda não implementados.
@@ -1033,6 +1040,32 @@ def _extract_secao_cabo_cobre_mm2(text: str) -> FieldExtraction | None:
     return FieldExtraction(value=value, evidence=evidence, rule="grounding_cable_section_regex", confidence="medium")
 
 
+def _extract_tem_gerador(text: str) -> FieldExtraction | None:
+    board = _GENERATOR_BOARD_RE.search(text)
+    if board:
+        return FieldExtraction(
+            value=True,
+            evidence=board.group(0).strip(),
+            rule="generator_q_board_marker",
+            confidence="high",
+        )
+    lowered = text.lower()
+    if re.search(r"\bgerad(?:or|ores)\b", lowered):
+        window = re.search(
+            r".{0,50}\bgerad(?:or|ores)\b.{0,50}",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        evidence = window.group(0).strip() if window else "gerador"
+        return FieldExtraction(
+            value=False,
+            evidence=_normalize_text(evidence),
+            rule="generator_mentioned_without_q_board",
+            confidence="medium",
+        )
+    return None
+
+
 def _extract_gerador_tipo_atendimento(text: str) -> FieldExtraction | None:
     match = _GENERATOR_BOARD_RE.search(text)
     if not match:
@@ -1166,6 +1199,7 @@ def map_extraction_to_partial_context(extraction_result: ProjectExtractionResult
     add("mt.secao_cabo_mm2", _extract_mt_secao_cabo_mm2(text))
 
     add("instalacao.perfilado_tipo", _extract_perfilado_tipo(raw_text))
+    add("gerador.tem_gerador", _extract_tem_gerador(text))
     add("gerador.tipo_atendimento", _extract_gerador_tipo_atendimento(text))
 
     for field_name, extraction in _extract_nao_inclusos(raw_text).items():
@@ -1286,5 +1320,170 @@ def map_extraction_to_partial_glp_context(
     add("dimensionamento.qtd_aquecedor", _extract_glp_qtd_aquecedor(text))
     add("dimensionamento.qtd_churrasqueira", _extract_glp_qtd_churrasqueira(text))
     add("soma.qtd_pontos_de_utilizacao", _extract_glp_total_points_from_quantitative_tables(raw_text))
+
+    return MappingResult(context=context, evidence=evidence)
+
+
+def _glp_v2_main_pipe_windows(raw_text: str) -> list[str]:
+    windows: list[str] = []
+    for pattern in (
+        r"ramal(?:\s+interno)?(?:\s+prim[aá]rio)?",
+        r"tubula[cç][ãa]o\s+principal",
+    ):
+        for match in re.finditer(pattern, raw_text, flags=re.IGNORECASE):
+            windows.append(raw_text[match.start() : match.start() + 220])
+    return windows
+
+
+def _extract_glp_v2_main_diameter(raw_text: str) -> FieldExtraction | None:
+    for window in _glp_v2_main_pipe_windows(raw_text):
+        nd = normalize_diameter(window)
+        if not nd:
+            continue
+        return FieldExtraction(
+            value={
+                "valor": float(nd.valor),
+                "unidade": nd.unidade,
+                "valor_formatado": nd.valor_formatado,
+                "valor_original": nd.valor_original,
+                "fonte_evidencia": [
+                    {
+                        "regra": "glp_v2_main_pipe_window",
+                        "texto": nd.valor_original,
+                        "confianca": "medium",
+                    }
+                ],
+            },
+            evidence=window.strip()[:200],
+            rule="glp_v2_main_pipe_diameter",
+            confidence="medium",
+        )
+    return None
+
+
+def _extract_glp_v2_valve_esfera(raw_text: str) -> FieldExtraction | None:
+    loose = _extract_gas_natural_valvula_esfera_diametro(raw_text)
+    if not loose:
+        return None
+    raw = loose.value if isinstance(loose.value, str) else str(loose.value)
+    nd = normalize_diameter(raw)
+    if not nd:
+        return FieldExtraction(
+            value={
+                "valor": 0.0,
+                "unidade": "mm",
+                "valor_formatado": raw,
+                "valor_original": raw,
+                "fonte_evidencia": [
+                    {"regra": loose.rule, "texto": loose.evidence or raw, "confianca": "medium"}
+                ],
+            },
+            evidence=loose.evidence,
+            rule="glp_v2_valve_diameter_fallback",
+            confidence="low",
+        )
+    return FieldExtraction(
+        value={
+            "valor": float(nd.valor),
+            "unidade": nd.unidade,
+            "valor_formatado": nd.valor_formatado,
+            "valor_original": nd.valor_original,
+            "fonte_evidencia": [
+                {
+                    "regra": loose.rule,
+                    "texto": nd.valor_original,
+                    "confianca": "medium",
+                }
+            ],
+        },
+        evidence=loose.evidence,
+        rule="glp_v2_valve_diameter",
+        confidence="medium",
+    )
+
+
+def assess_glp_v2_extraction_coverage(mapping: MappingResult) -> ExtractionReport:
+    filled = []
+    missing = []
+    for field_path in GLP_V2_EXTRACTABLE_BY_MAPPER:
+        value = _get_nested_value(mapping.context, field_path)
+        if value is not None:
+            filled.append(field_path)
+        else:
+            missing.append(field_path)
+
+    pending = []
+    for field_path in GLP_PENDING_EXTRACTION:
+        value = _get_nested_value(mapping.context, field_path)
+        if value is not None:
+            filled.append(field_path)
+        else:
+            pending.append(field_path)
+
+    return ExtractionReport(
+        filled=filled,
+        missing=missing,
+        pending=pending,
+        evidence=mapping.evidence,
+    )
+
+
+def map_extraction_to_partial_glp_v2_context(
+    extraction_result: ProjectExtractionResult,
+) -> MappingResult:
+    raw_text = extraction_result.raw_text
+    text = _normalize_text(raw_text)
+
+    context: dict[str, Any] = {}
+    evidence: dict[str, FieldExtraction] = {}
+
+    def add(path: str, extraction: FieldExtraction | None) -> None:
+        _add_field(context, evidence, path, extraction)
+
+    add("obra.construtora", _extract_construtora(raw_text))
+    add("obra.nome", _extract_nome_obra(raw_text))
+    add("obra.localizacao", _extract_localizacao(raw_text))
+    add("obra.numero_cadastro", _extract_numero_cadastro(raw_text))
+    ap_ext = _extract_qtd_apartamentos(text)
+    fg_ext = _extract_glp_qtd_fogao(text)
+    add("obra.qtd_apartamentos", ap_ext)
+    add("obra.tipo_edificacao", _extract_telecom_tipo_edificacao(text))
+    add("obra.tipologia", _extract_telecom_tipologia(text))
+    add("obra.qtd_lojas", _extract_telecom_qtd_lojas(text))
+    add("obra.qtd_restaurantes", _extract_telecom_qtd_restaurantes(text))
+    add("dimensionamento.qtd_fogao", fg_ext)
+    add("dimensionamento.qtd_aquecedor", _extract_glp_qtd_aquecedor(text))
+    add("dimensionamento.qtd_churrasqueira", _extract_glp_qtd_churrasqueira(text))
+    add("soma.qtd_pontos_de_utilizacao", _extract_glp_total_points_from_quantitative_tables(raw_text))
+    add("ramal.primario_material", _extract_gas_natural_ramal_material(raw_text))
+    add("ramal.primario_pavimento", _extract_gas_natural_ramal_pavimento(raw_text))
+    add("numero.prancha", _extract_gas_natural_numero_prancha(extraction_result))
+    add("teto_ou_piso", _extract_gas_natural_teto_ou_piso(text))
+
+    add("diametros.tubulacao_principal", _extract_glp_v2_main_diameter(raw_text))
+    add("diametros.valvula_esfera", _extract_glp_v2_valve_esfera(raw_text))
+
+    critical: list[dict[str, Any]] = []
+    if (
+        ap_ext
+        and fg_ext
+        and ap_ext.value == fg_ext.value
+        and fg_ext.rule == "glp_fogao_count_regex"
+    ):
+        critical.append(
+            {
+                "tipo": "glp_v2_fogao_apartamentos_colision",
+                "status": "unresolved",
+                "mensagem": (
+                    "Contagem de fogoes coincide com apartamentos sem evidencia de tabela quantitativa; "
+                    "revisar manualmente."
+                ),
+                "valores_observados": [ap_ext.value],
+                "fontes": [fg_ext.rule, ap_ext.rule],
+            }
+        )
+
+    if critical:
+        context["_glp_v2_critical_conflicts"] = critical
 
     return MappingResult(context=context, evidence=evidence)

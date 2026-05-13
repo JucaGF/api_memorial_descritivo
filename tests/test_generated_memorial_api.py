@@ -344,6 +344,71 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         self.assertIn("Armazenamento do memorial indisponível.", body)
         self.assertNotIn("/srv/private", body)
 
+    @patch("app.api.routes.create_generated_memorial")
+    @patch(
+        "app.api.routes.generate_memorial_glp_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_persist_passes_final_context_and_versions_to_store(
+        self,
+        pipeline_mock,
+        create_mock,
+    ) -> None:
+        from app.services.pipeline import PipelineResult
+        from app.services.extraction_mapper import ExtractionReport
+
+        async def pipeline_side_effect(_files, output_path: Path):
+            document = Document()
+            document.add_paragraph("Memorial GLP gerado.")
+            document.save(output_path)
+            return PipelineResult(
+                context={"obra": {"nome": "Exemplo"}, "abastecimento": {"qtd_tanques": 1}},
+                output_path=output_path,
+                extraction_report=ExtractionReport(
+                    filled=["obra.nome"],
+                    missing=[],
+                    pending=[],
+                ),
+            )
+
+        pipeline_mock.side_effect = pipeline_side_effect
+        create_mock.return_value = _memorial(memorial_type="glp")
+
+        files = [UploadFile(filename="projeto.pdf", file=BytesIO(b"%PDF-1.4 teste"))]
+        asyncio.run(
+            routes.create_persisted_memorial_from_files(
+                "glp",
+                MagicMock(),
+                files,
+                None,
+            )
+        )
+
+        kwargs = create_mock.call_args.kwargs
+        self.assertEqual(kwargs["memorial_type"], "glp")
+        self.assertEqual(kwargs["context_version"], "glp_v1")
+        self.assertEqual(kwargs["template_version"], "glp_v1")
+        self.assertEqual(kwargs["final_context"]["abastecimento"]["qtd_tanques"], 1)
+        self.assertIn("filled", kwargs["extraction_report"])
+        self.assertEqual(kwargs["extraction_report"]["filled"], ["obra.nome"])
+        self.assertEqual(kwargs["conflicts"], [])
+
+    @patch("app.api.routes.get_generated_memorial")
+    def test_get_memorial_with_include_context_propagates_flag(self, get_mock) -> None:
+        get_mock.return_value = _memorial()
+
+        routes.get_persisted_memorial("abc-123", include_context=True)
+
+        get_mock.assert_called_once_with("abc-123", include_context=True)
+
+    @patch("app.api.routes.get_generated_memorial")
+    def test_get_memorial_default_does_not_request_context(self, get_mock) -> None:
+        get_mock.return_value = _memorial()
+
+        routes.get_persisted_memorial("abc-123")
+
+        get_mock.assert_called_once_with("abc-123", include_context=False)
+
 
 if __name__ == "__main__":
     unittest.main()

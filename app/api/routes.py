@@ -10,11 +10,14 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.api.errors import (
+    build_client_error_response,
     build_error_response,
     build_internal_server_error_response,
+    build_memorial_validation_error_response,
     format_sanitized_exception_trace,
     get_request_id,
 )
+from app.config import get_settings
 from app.schemas.file_ingestion import FileIngestionResponse
 from app.schemas.generated_memorial import (
     GeneratedMemorialDownloadResponse,
@@ -30,10 +33,14 @@ from app.services.context_builder import merge_context
 from app.services.file_ingestion import (
     FileIngestionError,
     FileIngestionResult,
+    UploadFileTooLargeError,
+    UploadTooManyFilesError,
+    UploadTooManyPagesError,
+    UploadTotalTooLargeError,
     cleanup_ingestion_result,
     ingest_uploaded_files,
 )
-from app.services.memorial_renderer import MemorialRenderError
+from app.services.memorial_renderer import MemorialRenderError, GLP_V2_TEMPLATE_PATH
 from app.services.memorial_validator import MemorialValidationError
 from app.services.generated_memorial_store import (
     GeneratedMemorialArtifactNotFoundError,
@@ -56,6 +63,7 @@ from app.services.pipeline_from_files import (
     extract_mapping_from_ingested_files,
     generate_memorial_gas_natural_v1_from_uploaded_files,
     generate_memorial_glp_v1_from_uploaded_files,
+    generate_memorial_glp_v2_from_uploaded_files,
     generate_memorial_telecom_v1_from_uploaded_files,
     generate_memorial_eletrico_v1_from_uploaded_files,
 )
@@ -113,21 +121,22 @@ def _remove_file(path: Path) -> None:
 def _validation_error_response(
     error: MemorialValidationError,
     detail: str,
+    request: Request | None = None,
 ) -> JSONResponse:
-    content: dict = {
-        "detail": detail,
-        "errors": [
-            {
-                "path": issue.path,
-                "message": issue.message,
-                "validator": issue.validator,
-            }
-            for issue in error.issues
-        ],
-    }
-    if error.extraction_report is not None:
-        content["extraction_report"] = error.extraction_report
-    return JSONResponse(status_code=400, content=content)
+    issues = [
+        {
+            "path": issue.path,
+            "message": issue.message,
+            "validator": issue.validator,
+        }
+        for issue in error.issues
+    ]
+    return build_memorial_validation_error_response(
+        request=request,
+        detail=detail,
+        issues=issues,
+        extraction_report=error.extraction_report,
+    )
 
 
 def _docx_file_response(
@@ -159,31 +168,88 @@ def _file_ingestion_response(result) -> FileIngestionResponse:
     )
 
 
-def _unsupported_memorial_type_response(memorial_type: str) -> JSONResponse:
-    return JSONResponse(
+def _unsupported_memorial_type_response(
+    memorial_type: str,
+    request: Request | None = None,
+) -> JSONResponse:
+    detail = f"Tipo de memorial não encontrado: {memorial_type}."
+    return build_client_error_response(
+        request=request,
         status_code=404,
-        content={"detail": f"Tipo de memorial não encontrado: {memorial_type}."},
+        code="unsupported_memorial_type",
+        message=detail,
+        detail=detail,
+        details={"memorial_type": memorial_type},
     )
+
+
+_UPLOAD_LIMIT_ERRORS = (
+    UploadFileTooLargeError,
+    UploadTotalTooLargeError,
+    UploadTooManyFilesError,
+    UploadTooManyPagesError,
+)
+
+
+def _ingestion_error_status_code(error: FileIngestionError) -> int:
+    """413 for size/count violations, 400 for shape/content violations."""
+    return 413 if isinstance(error, _UPLOAD_LIMIT_ERRORS) else 400
+
+
+_TEMPLATE_VERSION_BY_TYPE = {
+    "eletrico": "eletrico_v1",
+    "telecom": "telecom_v1",
+    "gas-natural": "gas_natural_v1",
+    "glp": "glp_v1",
+}
+_CONTEXT_VERSION_BY_TYPE = _TEMPLATE_VERSION_BY_TYPE
 
 
 async def _generate_memorial_from_uploaded_files(
     memorial_type: str,
     files: list[UploadFile],
     output_path: Path,
-) -> None:
+):
     if memorial_type == "eletrico":
-        await generate_memorial_eletrico_v1_from_uploaded_files(files, output_path)
-        return
+        return await generate_memorial_eletrico_v1_from_uploaded_files(files, output_path)
     if memorial_type == "telecom":
-        await generate_memorial_telecom_v1_from_uploaded_files(files, output_path)
-        return
+        return await generate_memorial_telecom_v1_from_uploaded_files(files, output_path)
     if memorial_type == "gas-natural":
-        await generate_memorial_gas_natural_v1_from_uploaded_files(files, output_path)
-        return
+        return await generate_memorial_gas_natural_v1_from_uploaded_files(files, output_path)
     if memorial_type == "glp":
-        await generate_memorial_glp_v1_from_uploaded_files(files, output_path)
-        return
+        return await generate_memorial_glp_v1_from_uploaded_files(files, output_path)
     raise ValueError(f"Tipo de memorial não suportado: {memorial_type}.")
+
+
+def _extraction_report_to_jsonable(report: Any) -> dict[str, Any] | None:
+    """Convert ExtractionReport dataclass (or already-dict) into a JSON-friendly payload.
+
+    The dashboard/chatbot/site read this payload via the persisted memorial API to
+    surface evidence and conflicts that produced the rendered DOCX.
+    """
+    if report is None:
+        return None
+    if isinstance(report, dict):
+        return report
+    from dataclasses import asdict, is_dataclass
+
+    if is_dataclass(report):
+        return asdict(report)
+    return None
+
+
+def _extract_conflicts_from_report(extraction_report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not extraction_report:
+        return []
+    conflicts = extraction_report.get("conflicts")
+    if isinstance(conflicts, list):
+        return conflicts
+    cross_validation = extraction_report.get("cross_validation")
+    if isinstance(cross_validation, dict):
+        inner = cross_validation.get("conflicts")
+        if isinstance(inner, list):
+            return inner
+    return []
 
 
 def _validation_detail_for_type(memorial_type: str) -> str:
@@ -240,9 +306,9 @@ def _log_validation_failure(
     "/api/v1/memoriais",
     response_model=GeneratedMemorialListResponse,
 )
-def list_persisted_memorials(type: str | None = None):
+def list_persisted_memorials(request: Request, type: str | None = None):
     if type is not None and type not in _SUPPORTED_MEMORIAL_TYPES:
-        return _unsupported_memorial_type_response(type)
+        return _unsupported_memorial_type_response(type, request=request)
     return GeneratedMemorialListResponse(memorials=list_generated_memorials(type))
 
 
@@ -250,11 +316,18 @@ def list_persisted_memorials(type: str | None = None):
     "/api/v1/memoriais/{memorial_id}",
     response_model=GeneratedMemorialResponse,
 )
-def get_persisted_memorial(memorial_id: str):
-    memorial = get_generated_memorial(memorial_id)
+def get_persisted_memorial(
+    memorial_id: str,
+    request: Request,
+    include_context: bool = False,
+):
+    memorial = get_generated_memorial(memorial_id, include_context=include_context)
     if memorial is None:
-        return JSONResponse(
-            status_code=404, content={"detail": "Memorial não encontrado."}
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="generated_memorial_not_found",
+            message="Memorial não encontrado.",
         )
     return memorial
 
@@ -266,8 +339,11 @@ def get_persisted_memorial(memorial_id: str):
 def get_persisted_memorial_download(memorial_id: str, request: Request):
     record = get_generated_memorial_record(memorial_id)
     if record is None:
-        return JSONResponse(
-            status_code=404, content={"detail": "Memorial não encontrado."}
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="generated_memorial_not_found",
+            message="Memorial não encontrado.",
         )
     if record.get("status") != "ready":
         return build_error_response(
@@ -281,9 +357,11 @@ def get_persisted_memorial_download(memorial_id: str, request: Request):
             download_url=create_signed_download_url(record)
         )
     except GeneratedMemorialArtifactNotFoundError:
-        return JSONResponse(
+        return build_client_error_response(
+            request=request,
             status_code=404,
-            content={"detail": "Arquivo do memorial não está mais disponível."},
+            code="generated_memorial_artifact_missing",
+            message="Arquivo do memorial não está mais disponível.",
         )
     except GeneratedMemorialStorageError as error:
         logger.error(
@@ -311,9 +389,11 @@ def delete_persisted_memorial(memorial_id: str, request: Request):
     try:
         deleted = delete_generated_memorial(memorial_id)
     except GeneratedMemorialArtifactNotFoundError:
-        return JSONResponse(
+        return build_client_error_response(
+            request=request,
             status_code=404,
-            content={"detail": "Arquivo do memorial não está mais disponível."},
+            code="generated_memorial_artifact_missing",
+            message="Arquivo do memorial não está mais disponível.",
         )
     except GeneratedMemorialStorageError as error:
         logger.error(
@@ -333,8 +413,11 @@ def delete_persisted_memorial(memorial_id: str, request: Request):
         )
 
     if not deleted:
-        return JSONResponse(
-            status_code=404, content={"detail": "Memorial não encontrado."}
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="generated_memorial_not_found",
+            message="Memorial não encontrado.",
         )
     return Response(status_code=204)
 
@@ -351,7 +434,7 @@ async def create_persisted_memorial_from_files(
     observations: str | None = Form(default=None),
 ):
     if memorial_type not in _SUPPORTED_MEMORIAL_TYPES:
-        return _unsupported_memorial_type_response(memorial_type)
+        return _unsupported_memorial_type_response(memorial_type, request=request)
 
     uploaded_files = files or []
     pdf_filenames = [file.filename for file in uploaded_files if file.filename]
@@ -360,15 +443,27 @@ async def create_persisted_memorial_from_files(
         output_path = Path(temp_file.name)
 
     try:
-        await _generate_memorial_from_uploaded_files(
+        pipeline_result = await _generate_memorial_from_uploaded_files(
             memorial_type, uploaded_files, output_path
         )
+        final_context: dict[str, Any] | None = None
+        extraction_report_payload: dict[str, Any] | None = None
+        if pipeline_result is not None:
+            final_context = getattr(pipeline_result, "context", None)
+            extraction_report_payload = _extraction_report_to_jsonable(
+                getattr(pipeline_result, "extraction_report", None)
+            )
         return create_generated_memorial(
             memorial_type=memorial_type,
             project_name=_PROJECT_NAME_BY_TYPE[memorial_type],
             output_path=output_path,
             pdf_filenames=pdf_filenames,
             observations=observations,
+            final_context=final_context,
+            extraction_report=extraction_report_payload,
+            conflicts=_extract_conflicts_from_report(extraction_report_payload),
+            context_version=_CONTEXT_VERSION_BY_TYPE.get(memorial_type),
+            template_version=_TEMPLATE_VERSION_BY_TYPE.get(memorial_type),
         )
     except MemorialValidationError as error:
         _log_validation_failure(
@@ -378,7 +473,7 @@ async def create_persisted_memorial_from_files(
             "Generated memorial validation failed",
         )
         return _validation_error_response(
-            error, _validation_detail_for_type(memorial_type)
+            error, _validation_detail_for_type(memorial_type), request=request
         )
     except (FileIngestionError, ProjectExtractionError) as error:
         logger.warning(
@@ -389,7 +484,22 @@ async def create_persisted_memorial_from_files(
             memorial_type,
             type(error).__name__,
         )
-        return JSONResponse(status_code=400, content={"detail": str(error)})
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
+        )
     except MemorialRenderError as error:
         logger.error(
             "Generated memorial render failed method=%s path=%s request_id=%s memorial_type=%s error_type=%s\n%s",
@@ -435,7 +545,7 @@ def create_memorial_eletrico(
     except MemorialValidationError as error:
         _remove_file(output_path)
         return _validation_error_response(
-            error, "Payload invalido para o memorial eletrico v1."
+            error, "Payload invalido para o memorial eletrico v1.", request=request
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
@@ -468,7 +578,7 @@ def create_memorial_telecom(
     except MemorialValidationError as error:
         _remove_file(output_path)
         return _validation_error_response(
-            error, "Payload invalido para o memorial telecom v1."
+            error, "Payload invalido para o memorial telecom v1.", request=request
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
@@ -507,7 +617,7 @@ def create_memorial_gas_natural(
             "Memorial render validation failed",
         )
         return _validation_error_response(
-            error, "Payload invalido para o memorial gas natural v1."
+            error, "Payload invalido para o memorial gas natural v1.", request=request
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
@@ -546,7 +656,7 @@ def create_memorial_glp(
             "Memorial render validation failed",
         )
         return _validation_error_response(
-            error, "Payload invalido para o memorial GLP v1."
+            error, "Payload invalido para o memorial GLP v1.", request=request
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
@@ -568,15 +678,18 @@ def create_memorial_glp(
     response_model=FileIngestionResponse,
 )
 async def upload_memorial_eletrico_files(
+    request: Request,
     files: list[UploadFile] | None = File(default=None),
 ):
     result = None
     try:
         result = await ingest_uploaded_files(files or [])
     except FileIngestionError as error:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": error.detail},
+        return build_client_error_response(
+            request=request,
+            status_code=_ingestion_error_status_code(error),
+            code=getattr(error, "code", None) or "ingestion_error",
+            message=error.detail,
         )
     finally:
         if result is not None:
@@ -590,15 +703,18 @@ async def upload_memorial_eletrico_files(
     response_model=FileIngestionResponse,
 )
 async def upload_memorial_telecom_files(
+    request: Request,
     files: list[UploadFile] | None = File(default=None),
 ):
     result = None
     try:
         result = await ingest_uploaded_files(files or [])
     except FileIngestionError as error:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": error.detail},
+        return build_client_error_response(
+            request=request,
+            status_code=_ingestion_error_status_code(error),
+            code=getattr(error, "code", None) or "ingestion_error",
+            message=error.detail,
         )
     finally:
         if result is not None:
@@ -612,15 +728,18 @@ async def upload_memorial_telecom_files(
     response_model=FileIngestionResponse,
 )
 async def upload_memorial_gas_natural_files(
+    request: Request,
     files: list[UploadFile] | None = File(default=None),
 ):
     result = None
     try:
         result = await ingest_uploaded_files(files or [])
     except FileIngestionError as error:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": error.detail},
+        return build_client_error_response(
+            request=request,
+            status_code=_ingestion_error_status_code(error),
+            code=getattr(error, "code", None) or "ingestion_error",
+            message=error.detail,
         )
     finally:
         if result is not None:
@@ -676,13 +795,25 @@ async def create_memorial_eletrico_from_files(
     except MemorialValidationError as error:
         _remove_file(output_path)
         return _validation_error_response(
-            error, "Payload invalido para o memorial eletrico v1."
+            error, "Payload invalido para o memorial eletrico v1.", request=request
         )
     except (FileIngestionError, ProjectExtractionError) as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=400,
-            content={"detail": str(error)},
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
@@ -715,13 +846,25 @@ async def create_memorial_telecom_from_files(
     except MemorialValidationError as error:
         _remove_file(output_path)
         return _validation_error_response(
-            error, "Payload invalido para o memorial telecom v1."
+            error, "Payload invalido para o memorial telecom v1.", request=request
         )
     except (FileIngestionError, ProjectExtractionError) as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=400,
-            content={"detail": str(error)},
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
@@ -762,13 +905,25 @@ async def create_memorial_gas_natural_from_files(
             "Memorial render from files validation failed",
         )
         return _validation_error_response(
-            error, "Payload invalido para o memorial gas natural v1."
+            error, "Payload invalido para o memorial gas natural v1.", request=request
         )
     except (FileIngestionError, ProjectExtractionError) as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=400,
-            content={"detail": str(error)},
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
@@ -792,15 +947,18 @@ async def create_memorial_gas_natural_from_files(
     response_model=FileIngestionResponse,
 )
 async def upload_memorial_glp_files(
+    request: Request,
     files: list[UploadFile] | None = File(default=None),
 ):
     result = None
     try:
         result = await ingest_uploaded_files(files or [])
     except FileIngestionError as error:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": error.detail},
+        return build_client_error_response(
+            request=request,
+            status_code=_ingestion_error_status_code(error),
+            code=getattr(error, "code", None) or "ingestion_error",
+            message=error.detail,
         )
     finally:
         if result is not None:
@@ -823,13 +981,25 @@ async def create_memorial_glp_from_files(
     except MemorialValidationError as error:
         _remove_file(output_path)
         return _validation_error_response(
-            error, "Payload invalido para o memorial GLP v1."
+            error, "Payload invalido para o memorial GLP v1.", request=request
         )
     except (FileIngestionError, ProjectExtractionError) as error:
         _remove_file(output_path)
-        return JSONResponse(
-            status_code=400,
-            content={"detail": str(error)},
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
         )
     except MemorialRenderError as error:
         _remove_file(output_path)
@@ -846,6 +1016,183 @@ async def create_memorial_glp_from_files(
     return _docx_file_response(output_path, background_tasks, "memorial_glp_v1.docx")
 
 
+def _glp_v2_route_guard(request: Request) -> JSONResponse | None:
+    if not get_settings().glp_v2_enabled:
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="glp_v2_disabled",
+            message="GLP v2 esta desligado. Defina GLP_V2_ENABLED=true.",
+        )
+    if not GLP_V2_TEMPLATE_PATH.is_file():
+        return build_client_error_response(
+            request=request,
+            status_code=503,
+            code="glp_v2_template_pending",
+            message=(
+                "GLP v2 template DOCX must be authored manually before this route can serve documents."
+            ),
+        )
+    return None
+
+
+@router.post("/api/v1/memoriais/glp/v2/from-files")
+async def create_memorial_glp_v2_from_files(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] | None = File(default=None),
+):
+    blocked = _glp_v2_route_guard(request)
+    if blocked is not None:
+        return blocked
+
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        await generate_memorial_glp_v2_from_uploaded_files(files or [], output_path)
+    except MemorialValidationError as error:
+        _remove_file(output_path)
+        return _validation_error_response(
+            error, "Payload invalido para o memorial GLP v2.", request=request
+        )
+    except (FileIngestionError, ProjectExtractionError) as error:
+        _remove_file(output_path)
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
+        )
+    except MemorialRenderError as error:
+        _remove_file(output_path)
+        logger.error(
+            "Memorial render from files failed method=%s path=%s request_id=%s memorial_type=glp_v2 error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_internal_server_error_response(request)
+
+    return _docx_file_response(output_path, background_tasks, "memorial_glp_v2.docx")
+
+
+@router.post(
+    "/api/v1/memoriais/glp/v2/from-files/persist",
+    response_model=GeneratedMemorialResponse,
+    status_code=201,
+)
+async def create_persisted_memorial_glp_v2_from_files(
+    request: Request,
+    files: list[UploadFile] | None = File(default=None),
+    observations: str | None = Form(default=None),
+):
+    blocked = _glp_v2_route_guard(request)
+    if blocked is not None:
+        return blocked
+
+    uploaded_files = files or []
+    pdf_filenames = [file.filename for file in uploaded_files if file.filename]
+
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        pipeline_result = await generate_memorial_glp_v2_from_uploaded_files(
+            uploaded_files,
+            output_path,
+        )
+        final_context: dict[str, Any] | None = getattr(pipeline_result, "context", None)
+        extraction_report_payload = _extraction_report_to_jsonable(
+            getattr(pipeline_result, "extraction_report", None)
+        )
+        return create_generated_memorial(
+            memorial_type="glp_v2",
+            project_name="Memorial GLP v2",
+            output_path=output_path,
+            pdf_filenames=pdf_filenames,
+            observations=observations,
+            final_context=final_context,
+            extraction_report=extraction_report_payload,
+            conflicts=_extract_conflicts_from_report(extraction_report_payload),
+            context_version="glp_v2",
+            template_version="glp_v2",
+        )
+    except MemorialValidationError as error:
+        _log_validation_failure(
+            request,
+            "glp_v2",
+            error,
+            "Generated memorial GLP v2 validation failed",
+        )
+        return _validation_error_response(
+            error, "Payload invalido para o memorial GLP v2.", request=request
+        )
+    except (FileIngestionError, ProjectExtractionError) as error:
+        logger.warning(
+            "Generated memorial client error method=%s path=%s request_id=%s memorial_type=glp_v2 error_type=%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+        )
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
+        )
+    except MemorialRenderError as error:
+        logger.error(
+            "Generated memorial render failed method=%s path=%s request_id=%s memorial_type=glp_v2 error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_internal_server_error_response(request)
+    except GeneratedMemorialStorageError as error:
+        logger.error(
+            "Generated memorial persistence failed method=%s path=%s request_id=%s memorial_type=glp_v2 error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_error_response(
+            status_code=503,
+            code="generated_memorial_storage_error",
+            message="Armazenamento do memorial indisponível.",
+            request_id=get_request_id(request),
+        )
+    finally:
+        _remove_file(output_path)
+
+
 # ── Fluxo de revisão manual ──────────────────────────────────────────────────
 
 
@@ -855,13 +1202,19 @@ async def create_memorial_glp_from_files(
     status_code=202,
 )
 async def create_review_session(
+    request: Request,
     background_tasks: BackgroundTasks,
     files: list[UploadFile] | None = File(default=None),
 ):
     try:
         ingestion_result = await ingest_uploaded_files(files or [])
     except FileIngestionError as error:
-        return JSONResponse(status_code=400, content={"detail": error.detail})
+        return build_client_error_response(
+            request=request,
+            status_code=_ingestion_error_status_code(error),
+            code=getattr(error, "code", None) or "ingestion_error",
+            message=error.detail,
+        )
 
     session_id: str | None = None
     try:
@@ -881,11 +1234,14 @@ async def create_review_session(
     "/api/v1/memoriais/eletrico/sessoes/{session_id}",
     response_model=SessionStateResponse,
 )
-def get_review_session(session_id: str):
+def get_review_session(session_id: str, request: Request):
     session = load_session(session_id)
     if session is None:
-        return JSONResponse(
-            status_code=404, content={"detail": "Sessão não encontrada."}
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="review_session_not_found",
+            message="Sessão não encontrada.",
         )
     return SessionStateResponse(**session.__dict__)
 
@@ -894,15 +1250,25 @@ def get_review_session(session_id: str):
     "/api/v1/memoriais/eletrico/sessoes/{session_id}/contexto",
     response_model=SessionStateResponse,
 )
-def patch_review_session_context(session_id: str, payload: ContextCorrectionsPayload):
+def patch_review_session_context(
+    session_id: str,
+    payload: ContextCorrectionsPayload,
+    request: Request,
+):
     session = load_session(session_id)
     if session is None:
-        return JSONResponse(
-            status_code=404, content={"detail": "Sessão não encontrada."}
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="review_session_not_found",
+            message="Sessão não encontrada.",
         )
     if session.status == "processing":
-        return JSONResponse(
-            status_code=409, content={"detail": "Extração ainda em andamento."}
+        return build_client_error_response(
+            request=request,
+            status_code=409,
+            code="review_session_processing",
+            message="Extração ainda em andamento.",
         )
 
     merged_corrections = merge_context(session.corrections, payload.corrections)
@@ -918,15 +1284,19 @@ def generate_from_review_session(
 ):
     session = load_session(session_id)
     if session is None:
-        return JSONResponse(
-            status_code=404, content={"detail": "Sessão não encontrada."}
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="review_session_not_found",
+            message="Sessão não encontrada.",
         )
     if session.status not in (STATUS_PENDING_REVIEW, "completed"):
-        return JSONResponse(
+        return build_client_error_response(
+            request=request,
             status_code=409,
-            content={
-                "detail": f"Sessão em status '{session.status}' não pode gerar memorial."
-            },
+            code="review_session_not_ready",
+            message=f"Sessão em status '{session.status}' não pode gerar memorial.",
+            details={"session_status": session.status},
         )
 
     merged = merge_context(session.partial_context, session.corrections)
@@ -939,7 +1309,7 @@ def generate_from_review_session(
     except MemorialValidationError as error:
         _remove_file(output_path)
         return _validation_error_response(
-            error, "Payload invalido para o memorial eletrico v1."
+            error, "Payload invalido para o memorial eletrico v1.", request=request
         )
     except MemorialRenderError as error:
         _remove_file(output_path)

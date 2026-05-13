@@ -62,6 +62,17 @@ def build_memorial_eletrico_v1_context(input_payload: dict[str, Any]) -> dict[st
     context["nao_inclusos"] = nao_inclusos
 
     gerador = _ensure_dict(context, "gerador")
+    if gerador.get("tem_gerador") is None:
+        qtd = gerador.get("qtd")
+        if isinstance(qtd, int) and not isinstance(qtd, bool) and qtd > 0:
+            gerador["tem_gerador"] = True
+        else:
+            gerador["tem_gerador"] = False
+    if gerador.get("tem_gerador") is False:
+        gerador["qtd"] = 0
+        gerador["potencia_kva"] = 0
+        if gerador.get("tipo_atendimento") is None:
+            gerador["tipo_atendimento"] = "condominio"
     if gerador.get("tipo_atendimento") != "parcial":
         gerador["circuitos_atendidos"] = None
     context["gerador"] = gerador
@@ -104,5 +115,18 @@ def build_memorial_glp_v1_context(input_payload: dict[str, Any]) -> dict[str, An
     documento = _ensure_dict(context, "documento")
     documento.setdefault("data_atual", date.today().strftime("%d/%m/%Y"))
     context["documento"] = documento
+
+    return context
+
+
+def build_memorial_glp_v2_context(input_payload: dict[str, Any]) -> dict[str, Any]:
+    context = deepcopy(input_payload)
+
+    documento = _ensure_dict(context, "documento")
+    documento.setdefault("data_atual", date.today().strftime("%d/%m/%Y"))
+    context["documento"] = documento
+
+    context.setdefault("context_version", "glp_v2")
+    context.setdefault("template_version", "glp_v2")
 
     return context
