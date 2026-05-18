@@ -66,8 +66,6 @@ class AppSettings:
             max_pdf_pages=100,
         )
     )
-    glp_v2_enabled: bool = False
-
     @property
     def readiness_configuration_status(self) -> str:
         return "strict" if self.app_env is AppEnvironment.PRODUCTION else "default"
@@ -150,13 +148,6 @@ def get_settings() -> AppSettings:
         ),
     )
 
-    glp_v2_enabled = os.getenv("GLP_V2_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
     return AppSettings(
         app_env=app_env,
         cors_allowed_origins=cors_allowed_origins,
@@ -167,5 +158,4 @@ def get_settings() -> AppSettings:
             supabase_key=supabase_key,
         ),
         upload_limits=upload_limits,
-        glp_v2_enabled=glp_v2_enabled,
     )

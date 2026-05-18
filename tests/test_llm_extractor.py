@@ -253,7 +253,7 @@ class OpenAIClientResilienceTests(unittest.TestCase):
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("OPENAI_REQUEST_TIMEOUT", None)
-            self.assertEqual(llm_extractor._get_request_timeout(), 60.0)
+            self.assertEqual(llm_extractor._get_request_timeout(), 180.0)
 
     def test_get_request_timeout_parses_env_value(self) -> None:
         from app.services import llm_extractor
@@ -265,13 +265,59 @@ class OpenAIClientResilienceTests(unittest.TestCase):
         from app.services import llm_extractor
 
         with patch.dict(os.environ, {"OPENAI_REQUEST_TIMEOUT": "lots"}, clear=False):
-            self.assertEqual(llm_extractor._get_request_timeout(), 60.0)
+            self.assertEqual(llm_extractor._get_request_timeout(), 180.0)
 
     def test_get_request_timeout_falls_back_on_negative_value(self) -> None:
         from app.services import llm_extractor
 
         with patch.dict(os.environ, {"OPENAI_REQUEST_TIMEOUT": "-5"}, clear=False):
-            self.assertEqual(llm_extractor._get_request_timeout(), 60.0)
+            self.assertEqual(llm_extractor._get_request_timeout(), 180.0)
+
+    def test_effective_batch_concurrency_keeps_text_only_parallelism(self) -> None:
+        from app.services import llm_extractor
+
+        files = [
+            _source_file(name=f"file_{index}.pdf", text="texto rico " * 500)
+            for index in range(5)
+        ]
+
+        self.assertEqual(
+            llm_extractor._effective_batch_concurrency(files, configured_max=5),
+            5,
+        )
+
+    def test_effective_batch_concurrency_caps_vision_batches(self) -> None:
+        from app.services import llm_extractor
+
+        files = [
+            _source_file(
+                name=f"file_{index}.pdf",
+                text="texto curto",
+                page_images=["data:image/png;base64,abc"],
+            )
+            for index in range(5)
+        ]
+
+        self.assertEqual(
+            llm_extractor._effective_batch_concurrency(files, configured_max=5),
+            2,
+        )
+
+    def test_effective_batch_concurrency_respects_lower_configured_max(self) -> None:
+        from app.services import llm_extractor
+
+        files = [
+            _source_file(
+                name="file_0.pdf",
+                text="texto curto",
+                page_images=["data:image/png;base64,abc"],
+            )
+        ]
+
+        self.assertEqual(
+            llm_extractor._effective_batch_concurrency(files, configured_max=1),
+            1,
+        )
 
     def test_extract_batch_isolates_per_file_failures(self) -> None:
         """1 file raises -> the batch still returns results from the other files."""
@@ -320,6 +366,89 @@ class OpenAIClientResilienceTests(unittest.TestCase):
             ["file_0.pdf", "file_1.pdf", "file_3.pdf", "file_4.pdf"],
         )
         self.assertNotIn("file_2.pdf", filenames)
+
+    def test_extract_batch_falls_back_when_batch_merger_times_out(self) -> None:
+        """A merge timeout should not abort a batch with valid per-file results."""
+        from app.services import llm_extractor
+
+        source_files = [
+            _source_file(name="file_0.pdf", text="texto 0"),
+            _source_file(name="file_1.pdf", text="texto 1"),
+        ]
+
+        def fake_single_file(client, model, source_file):
+            return {"obra": {"nome": f"From {source_file.original_filename}"}}
+
+        def failing_merger(client, model, per_file):
+            raise TimeoutError("simulated merge timeout")
+
+        strategy = llm_extractor.ExtractionStrategy(
+            name="TestStrategy",
+            cross_validation_intro="x",
+            text_format=llm_extractor.LLMExtraction,
+            single_file_extractor=fake_single_file,
+            batch_merger=failing_merger,
+        )
+
+        result = llm_extractor._extract_batch(
+            strategy=strategy,
+            client=MagicMock(),
+            model="gpt-test",
+            batch_index=0,
+            source_files=source_files,
+            max_concurrency=2,
+        )
+
+        self.assertEqual(len(result.per_file_results), 2)
+        self.assertEqual(result.merged_payload, {"obra": {"nome": "From file_0.pdf"}})
+        self.assertTrue(result.merge_fallback_used)
+        self.assertEqual(result.merge_error_type, "TimeoutError")
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.5")
+    def test_run_result_reports_batch_merge_fallback(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        from app.services import llm_extractor
+
+        response_a = MagicMock()
+        response_a.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="A"))
+        response_b = MagicMock()
+        response_b.output_parsed = LLMExtraction(obra=ObraExtraction(construtora="B"))
+
+        mock_client = MagicMock()
+        mock_client.responses.parse.side_effect = [
+            response_a,
+            response_b,
+            TimeoutError("merge timed out"),
+        ]
+        client_mock.return_value = mock_client
+
+        files = [_source_file("a.pdf", "text a"), _source_file("b.pdf", "text b")]
+        with patch.dict(
+            os.environ,
+            {
+                "USE_LLM_EXTRACTION": "true",
+                "LLM_EXTRACTION_MAX_CONCURRENCY": "1",
+            },
+        ):
+            result = llm_extractor.extract_with_llm_result(files)
+
+        self.assertEqual(result.context["obra"]["construtora"], "A")
+        self.assertIsNotNone(result.cross_validation)
+        self.assertTrue(result.cross_validation["batch_merge_fallback_used"])
+        self.assertEqual(
+            result.cross_validation["batch_merge_errors"],
+            [
+                {
+                    "batch_index": 0,
+                    "error_type": "TimeoutError",
+                    "files": ["a.pdf", "b.pdf"],
+                }
+            ],
+        )
 
     def test_extract_batch_returns_empty_when_all_files_fail(self) -> None:
         from app.services import llm_extractor

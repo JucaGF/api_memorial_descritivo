@@ -47,6 +47,12 @@ from app.services.pipeline import (
     generate_memorial_telecom_v1,
 )
 from app.services.project_extractor import ProjectExtractionError, extract_project_files
+from app.services.quantitative_extraction import (
+    GlpV2QuantitativeResult,
+    QuantitativeCandidate,
+    extract_glp_v2_quantitative_candidates,
+    resolve_glp_v2_quantitatives,
+)
 
 logger = logging.getLogger(__name__)
 _GLP_CONFLICTS_KEY = "_glp_total_points_conflicts"
@@ -339,6 +345,248 @@ def _build_extraction_report_payload(
     return payload
 
 
+def _attach_glp_v2_quantitative_report(
+    report: ExtractionReport,
+    quantitative_result: GlpV2QuantitativeResult,
+) -> ExtractionReport:
+    cross_validation = dict(report.cross_validation or {})
+    cross_validation.update(quantitative_result.to_cross_validation_payload())
+    return _attach_cross_validation_report(report, cross_validation)
+
+
+_AUTHORITATIVE_QUANTITATIVE_FIELDS = {
+    "eletrico": {
+        "obra.qtd_apartamentos",
+        "aterramento.qtd_hastes",
+        "aterramento.secao_cabo_cobre_mm2",
+        "mt.tensao_kv",
+        "mt.secao_cabo_mm2",
+        "gerador.tem_gerador",
+    },
+    "gas_natural": {
+        "obra.qtd_apartamentos",
+        "dimensionamento.qtd_fogao",
+        "dimensionamento.qtd_aquecedor",
+        "dimensionamento.qtd_churrasqueira",
+        "soma.qtd_pontos_de_utilizacao",
+    },
+}
+
+
+def _get_path(context: dict[str, Any], path: str) -> Any:
+    value: Any = context
+    for key in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _set_path(context: dict[str, Any], path: str, value: Any) -> None:
+    target = context
+    keys = path.split(".")
+    for key in keys[:-1]:
+        section = target.get(key)
+        if not isinstance(section, dict):
+            section = {}
+            target[key] = section
+        target = section
+    target[keys[-1]] = value
+
+
+def _quantitative_candidate_from_evidence(
+    *,
+    memorial_type: str,
+    field_path: str,
+    value: Any,
+    evidence: Any,
+) -> QuantitativeCandidate:
+    return QuantitativeCandidate(
+        field_path=field_path,
+        value=value,
+        unit=None,
+        entity=field_path,
+        memorial_type=memorial_type,
+        source_file=None,
+        page_number=None,
+        source_kind="deterministic_mapper",
+        extraction_method=str(getattr(evidence, "rule", "mapper")),
+        evidence_text=getattr(evidence, "evidence", None),
+        confidence=str(getattr(evidence, "confidence", "medium")),
+    )
+
+
+def _is_authoritative_quantitative_evidence(
+    *,
+    memorial_type: str,
+    field_path: str,
+    evidence: Any,
+) -> bool:
+    confidence = str(getattr(evidence, "confidence", "medium"))
+    rule = str(getattr(evidence, "rule", ""))
+    if confidence == "high":
+        return True
+    if memorial_type == "gas_natural" and field_path.startswith(
+        ("dimensionamento.", "soma.")
+    ):
+        return confidence in {"high", "medium"}
+    if (
+        memorial_type == "eletrico"
+        and field_path == "gerador.tem_gerador"
+        and rule == "generator_mentioned_without_q_board"
+    ):
+        return True
+    return False
+
+
+def _attach_quantitative_report(
+    report: ExtractionReport,
+    *,
+    candidates: list[QuantitativeCandidate],
+    resolutions: list[dict[str, Any]],
+    conflicts: list[dict[str, Any]],
+) -> ExtractionReport:
+    if not candidates and not resolutions and not conflicts:
+        return report
+    cross_validation = dict(report.cross_validation or {})
+    cross_validation["quantitative_candidates"] = [
+        candidate.to_report() for candidate in candidates
+    ]
+    cross_validation["quantitative_resolutions"] = resolutions
+    cross_validation["quantitative_conflicts"] = conflicts
+    return _attach_cross_validation_report(report, cross_validation)
+
+
+def _apply_authoritative_quantitative_mapper_values(
+    context: dict[str, Any],
+    mapper_mapping: MappingResult,
+    *,
+    memorial_type: str,
+) -> tuple[dict[str, Any], list[QuantitativeCandidate], list[dict[str, Any]], list[dict[str, Any]]]:
+    fields = _AUTHORITATIVE_QUANTITATIVE_FIELDS.get(memorial_type, set())
+    if not fields:
+        return context, [], [], []
+
+    resolved = dict(context)
+    candidates: list[QuantitativeCandidate] = []
+    resolutions: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+
+    for field_path in fields:
+        evidence = mapper_mapping.evidence.get(field_path)
+        if evidence is None:
+            continue
+        mapper_value = getattr(evidence, "value", None)
+        if mapper_value is None:
+            continue
+        candidate = _quantitative_candidate_from_evidence(
+            memorial_type=memorial_type,
+            field_path=field_path,
+            value=mapper_value,
+            evidence=evidence,
+        )
+        candidates.append(candidate)
+
+        if not _is_authoritative_quantitative_evidence(
+            memorial_type=memorial_type,
+            field_path=field_path,
+            evidence=evidence,
+        ):
+            continue
+
+        current_value = _get_path(resolved, field_path)
+        if current_value == mapper_value:
+            continue
+        _set_path(resolved, field_path, mapper_value)
+        resolutions.append(
+            {
+                "field_path": field_path,
+                "status": "resolved",
+                "selected_value": mapper_value,
+                "previous_value": current_value,
+                "rule": f"{memorial_type}_authoritative_mapper_quantitative",
+                "message": "Valor quantitativo selecionado a partir de evidencia deterministica do projeto.",
+                "candidates": [candidate.to_report()],
+            }
+        )
+
+    if memorial_type == "eletrico" and _get_path(resolved, "gerador.tem_gerador") is False:
+        gerador = resolved.setdefault("gerador", {})
+        if isinstance(gerador, dict):
+            previous_qtd = gerador.get("qtd")
+            previous_power = gerador.get("potencia_kva")
+            gerador["qtd"] = 0
+            gerador["potencia_kva"] = 0
+            if gerador.get("tipo_atendimento") is None:
+                gerador["tipo_atendimento"] = "condominio"
+            if previous_qtd not in (None, 0) or previous_power not in (None, 0):
+                resolutions.append(
+                    {
+                        "field_path": "gerador",
+                        "status": "resolved",
+                        "selected_value": {"qtd": 0, "potencia_kva": 0},
+                        "previous_value": {
+                            "qtd": previous_qtd,
+                            "potencia_kva": previous_power,
+                        },
+                        "rule": "eletrico_generator_absence_zeroes_quantities",
+                        "message": "Quantidade e potencia do gerador foram zeradas porque a evidencia indica ausencia de gerador instalado.",
+                        "candidates": [],
+                    }
+                )
+
+    return resolved, candidates, resolutions, conflicts
+
+
+def _reconcile_gas_natural_quantitative_total(
+    context: dict[str, Any],
+    *,
+    candidates: list[QuantitativeCandidate],
+    resolutions: list[dict[str, Any]],
+    conflicts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    dimensionamento = context.get("dimensionamento")
+    if not isinstance(dimensionamento, dict):
+        return context
+
+    values: list[int] = []
+    for key in ("qtd_fogao", "qtd_aquecedor", "qtd_churrasqueira"):
+        value = dimensionamento.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return context
+        values.append(value)
+
+    calculated_total = sum(values)
+    reported_total = _get_path(context, "soma.qtd_pontos_de_utilizacao")
+    if reported_total == calculated_total:
+        return context
+
+    _set_path(context, "soma.qtd_pontos_de_utilizacao", calculated_total)
+    conflicts.append(
+        {
+            "tipo": "gas_natural_points_total_mismatch",
+            "status": "resolved",
+            "field_path": "soma.qtd_pontos_de_utilizacao",
+            "valores_observados": [reported_total, calculated_total],
+            "valor_selecionado": calculated_total,
+            "resolucao": "gas_natural_dimensionamento_total_recalculated",
+            "mensagem": "Total de pontos recalculado a partir dos pontos individuais.",
+        }
+    )
+    resolutions.append(
+        {
+            "field_path": "soma.qtd_pontos_de_utilizacao",
+            "status": "resolved",
+            "selected_value": calculated_total,
+            "previous_value": reported_total,
+            "rule": "gas_natural_dimensionamento_total_recalculated",
+            "message": "Total de pontos recalculado a partir de fogao, aquecedor e churrasqueira.",
+            "candidates": [candidate.to_report() for candidate in candidates],
+        }
+    )
+    return context
+
+
 def _extract_llm_primary(
     files: list[IngestedFileMetadata],
 ) -> tuple[MappingResult, ExtractionReport]:
@@ -364,9 +612,23 @@ def _extract_llm_primary(
     else:
         final_context = llm_context
 
+    final_context, candidates, resolutions, conflicts = (
+        _apply_authoritative_quantitative_mapper_values(
+            final_context,
+            mapper_mapping,
+            memorial_type="eletrico",
+        )
+    )
+
     mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
     report = assess_extraction_coverage(mapping)
     report = _attach_cross_validation_report(report, llm_result.cross_validation)
+    report = _attach_quantitative_report(
+        report,
+        candidates=candidates,
+        resolutions=resolutions,
+        conflicts=conflicts,
+    )
     logger.info(
         "Extraction coverage: filled=%d, missing=%d, pending=%d",
         len(report.filled), len(report.missing), len(report.pending),
@@ -470,11 +732,30 @@ def extract_gas_natural_mapping_from_ingested_files(
             final_context = merge_context(llm_context, gap_fills)
         else:
             final_context = llm_context
+        final_context, candidates, resolutions, conflicts = (
+            _apply_authoritative_quantitative_mapper_values(
+                final_context,
+                mapper_mapping,
+                memorial_type="gas_natural",
+            )
+        )
         final_context = _normalize_gas_natural_context(final_context)
+        final_context = _reconcile_gas_natural_quantitative_total(
+            final_context,
+            candidates=candidates,
+            resolutions=resolutions,
+            conflicts=conflicts,
+        )
 
         mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
         report = assess_gas_natural_extraction_coverage(mapping)
         report = _attach_cross_validation_report(report, llm_result.cross_validation)
+        report = _attach_quantitative_report(
+            report,
+            candidates=candidates,
+            resolutions=resolutions,
+            conflicts=conflicts,
+        )
         logger.info(
             "Gas natural extraction coverage: filled=%d, missing=%d, pending=%d",
             len(report.filled), len(report.missing), len(report.pending),
@@ -719,12 +1000,15 @@ def _glp_v2_coalesce_diameter(
 def _assemble_glp_v2_payload(
     merged: dict[str, Any],
     mapper_critical: list[dict[str, Any]],
+    quantitative_result: GlpV2QuantitativeResult | None = None,
 ) -> dict[str, Any]:
     work = dict(merged)
     work.pop(_GLP_V2_CRITICAL, None)
+    if quantitative_result is None:
+        quantitative_result = resolve_glp_v2_quantitatives(work, mapper_critical)
 
     obra = dict(work.get("obra") or {})
-    qtd_ap = obra.get("qtd_apartamentos")
+    qtd_ap = quantitative_result.obra.get("qtd_apartamentos")
     if isinstance(qtd_ap, int) and not isinstance(qtd_ap, bool):
         obra["qtd_apartamentos"] = {
             "valor": qtd_ap,
@@ -745,7 +1029,7 @@ def _assemble_glp_v2_payload(
     if not isinstance(tanques_in, dict):
         tanques_in = {}
     tanques: dict[str, Any] = {
-        "quantidade": int(tanques_in.get("quantidade") or 0),
+        "quantidade": int(quantitative_result.tanques.get("quantidade") or 0),
         "fonte_evidencia": list(tanques_in.get("fonte_evidencia") or []),
         "conflitos": list(tanques_in.get("conflitos") or []),
     }
@@ -766,61 +1050,8 @@ def _assemble_glp_v2_payload(
     if ab_raw.get("fonte_evidencia"):
         abastecimento["fonte_evidencia"] = ab_raw["fonte_evidencia"]
 
-    dim = work.get("dimensionamento") or {}
-    if not isinstance(dim, dict):
-        dim = {}
-    dimensionamento = {
-        "qtd_fogao": int(dim.get("qtd_fogao") or 0),
-        "qtd_aquecedor": int(dim.get("qtd_aquecedor") or 0),
-        "qtd_churrasqueira": int(dim.get("qtd_churrasqueira") or 0),
-        "qtd_outros": int(dim.get("qtd_outros") or 0),
-    }
-
-    pu_in = work.get("pontos_utilizacao") or {}
-    if not isinstance(pu_in, dict):
-        pu_in = {}
-    fog = pu_in.get("fogao")
-    if fog is None:
-        fog = dimensionamento["qtd_fogao"]
-    ch = pu_in.get("churrasqueira")
-    if ch is None:
-        ch = dimensionamento["qtd_churrasqueira"]
-    aq = pu_in.get("aquecedor")
-    if aq is None:
-        aq = dimensionamento["qtd_aquecedor"]
-    outros = pu_in.get("outros")
-    if outros is None:
-        outros = dimensionamento["qtd_outros"]
-
-    fog_i, ch_i, aq_i, ou_i = int(fog or 0), int(ch or 0), int(aq or 0), int(outros or 0)
-    total_calc = fog_i + ch_i + aq_i + ou_i
-
-    pu_conflicts: list[dict[str, Any]] = [
-        dict(c) for c in (pu_in.get("conflitos") or []) if isinstance(c, dict)
-    ]
-    for mc in mapper_critical:
-        pu_conflicts.append(dict(mc))
-
-    total_ext = pu_in.get("total_extraido")
-    if total_ext is not None and int(total_ext) != total_calc:
-        pu_conflicts.append({
-            "tipo": "glp_v2_points_total_mismatch",
-            "status": "unresolved",
-            "valores_observados": [total_ext, total_calc],
-            "fontes": ["total_extraido", "total_calculado"],
-            "mensagem": "Total extraido difere da soma por tipo.",
-        })
-
-    pontos_utilizacao: dict[str, Any] = {
-        "fogao": fog_i,
-        "churrasqueira": ch_i,
-        "aquecedor": aq_i,
-        "outros": ou_i,
-        "total_extraido": total_ext,
-        "total_calculado": total_calc,
-        "fontes_evidencia": list(pu_in.get("fontes_evidencia") or []),
-        "conflitos": pu_conflicts,
-    }
+    dimensionamento = quantitative_result.dimensionamento
+    pontos_utilizacao = quantitative_result.pontos_utilizacao
 
     d_llm = work.get("diametros") or {}
     if not isinstance(d_llm, dict):
@@ -912,7 +1143,14 @@ def extract_glp_v2_mapping_from_ingested_files(
     report = assess_glp_v2_extraction_coverage(assess_ctx)
     report = _attach_cross_validation_report(report, llm_result.cross_validation)
 
-    assembled = _assemble_glp_v2_payload(merged, critical)
+    quantitative_candidates = extract_glp_v2_quantitative_candidates(extraction_result)
+    quantitative_result = resolve_glp_v2_quantitatives(
+        merged,
+        critical,
+        extra_candidates=quantitative_candidates,
+    )
+    report = _attach_glp_v2_quantitative_report(report, quantitative_result)
+    assembled = _assemble_glp_v2_payload(merged, critical, quantitative_result)
     mapping = MappingResult(context=assembled, evidence=mapper_mapping.evidence)
     logger.info(
         "GLP v2 extraction coverage: filled=%d, missing=%d, pending=%d",

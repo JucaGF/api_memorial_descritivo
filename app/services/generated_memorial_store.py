@@ -145,6 +145,7 @@ def _response_from_record(
     *,
     include_download_url: bool = True,
     include_context: bool = False,
+    include_report: bool = True,
 ) -> GeneratedMemorialResponse:
     download_url = (
         create_signed_download_url(record)
@@ -166,6 +167,7 @@ def _response_from_record(
     }
     if include_context:
         payload["final_context"] = record.get("final_context")
+    if include_context or include_report:
         payload["extraction_report"] = record.get("extraction_report")
         payload["conflicts"] = record.get("conflicts") or []
     return GeneratedMemorialResponse.model_validate(payload)
@@ -242,7 +244,11 @@ def create_generated_memorial(
             "Falha ao persistir memorial gerado."
         ) from error
 
-    return _response_from_record({**record, "status": STATUS_READY}, include_context=False)
+    return _response_from_record(
+        {**record, "status": STATUS_READY},
+        include_context=False,
+        include_report=True,
+    )
 
 
 def list_generated_memorials(memorial_type: str | None = None) -> list[GeneratedMemorialResponse]:

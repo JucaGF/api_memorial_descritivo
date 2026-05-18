@@ -211,6 +211,70 @@ class MemorialValidatorTests(unittest.TestCase):
         }
         validate_memorial_glp_v2_context(context)
 
+    def test_validate_memorial_glp_v2_context_accepts_resolved_quantitative_conflict(self) -> None:
+        context = {
+            "documento": {"data_atual": "01/01/2026"},
+            "obra": {
+                "numero_cadastro": "1",
+                "construtora": "X",
+                "nome": "Y",
+                "localizacao": "Z",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": {"valor": 29, "confianca": "medium"},
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 35,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 35,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {
+                "fogao": 35,
+                "churrasqueira": 35,
+                "aquecedor": 0,
+                "outros": 0,
+                "total_extraido": 70,
+                "total_calculado": 70,
+                "fontes_evidencia": [],
+                "conflitos": [
+                    {
+                        "tipo": "glp_v2_points_total_mismatch",
+                        "status": "resolved",
+                        "valores_observados": [70, 34],
+                        "fontes": ["total_extraido", "total_calculado"],
+                        "mensagem": "Total extraido difere da soma por tipo.",
+                        "valor_selecionado": 70,
+                        "resolucao": "glp_v2_even_total_split",
+                    }
+                ],
+            },
+            "diametros": {
+                "tubulacao_principal": {
+                    "valor": 1.25,
+                    "unidade": "in",
+                    "valor_formatado": '1 1/4"',
+                },
+                "valvula_esfera": {
+                    "valor": 1.25,
+                    "unidade": "in",
+                    "valor_formatado": '1 1/4"',
+                    "inferido": True,
+                },
+            },
+            "ramal": {"primario_material": "aço carbono", "primario_pavimento": "térreo"},
+            "numero": {"prancha": "01/01"},
+            "teto_ou_piso": "piso",
+            "context_version": "glp_v2",
+            "template_version": "glp_v2",
+        }
+
+        validate_memorial_glp_v2_context(context)
+
     def test_validate_memorial_glp_v2_context_rejects_bad_version(self) -> None:
         context = {
             "documento": {"data_atual": "01/01/2026"},

@@ -162,12 +162,6 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(settings.upload_limits.max_total_upload_mb, 500)
         self.assertEqual(settings.upload_limits.max_pdf_pages, 300)
 
-    def test_glp_v2_enabled_parses_truthy_env(self) -> None:
-        with patch.dict(os.environ, {**_base_env(), "GLP_V2_ENABLED": "true"}, clear=False):
-            from app.config import get_settings
-
-            self.assertTrue(get_settings().glp_v2_enabled)
-
     def test_invalid_upload_limit_raises_configuration_error(self) -> None:
         with patch.dict(
             os.environ,

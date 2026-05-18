@@ -38,6 +38,8 @@ class BatchExtractionResult:
     files: list[str]
     per_file_results: list[BatchFileExtractionResult]
     merged_payload: dict[str, Any]
+    merge_fallback_used: bool = False
+    merge_error_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -626,21 +628,24 @@ def _get_model() -> str:
 
 
 def _get_request_timeout() -> float:
-    raw = os.getenv("OPENAI_REQUEST_TIMEOUT", "60").strip()
+    default = 180.0
+    raw = os.getenv("OPENAI_REQUEST_TIMEOUT", str(int(default))).strip()
     try:
         value = float(raw)
     except ValueError:
         logger.warning(
-            "Invalid OPENAI_REQUEST_TIMEOUT=%r, falling back to 60.0",
+            "Invalid OPENAI_REQUEST_TIMEOUT=%r, falling back to %.1f",
             raw,
+            default,
         )
-        return 60.0
+        return default
     if value <= 0:
         logger.warning(
-            "Non-positive OPENAI_REQUEST_TIMEOUT=%r, falling back to 60.0",
+            "Non-positive OPENAI_REQUEST_TIMEOUT=%r, falling back to %.1f",
             raw,
+            default,
         )
-        return 60.0
+        return default
     return value
 
 
@@ -1184,6 +1189,19 @@ def _get_max_concurrency() -> int:
     return _get_positive_int_env("LLM_EXTRACTION_MAX_CONCURRENCY", 5)
 
 
+def _effective_batch_concurrency(
+    source_files: list[ExtractedSourceFile],
+    configured_max: int,
+) -> int:
+    has_vision_payload = any(
+        source_file.page_images and not _has_rich_text(source_file)
+        for source_file in source_files
+    )
+    if has_vision_payload:
+        return min(configured_max, 2)
+    return configured_max
+
+
 def _chunk_source_files(
     source_files: list[ExtractedSourceFile],
     batch_size: int,
@@ -1316,20 +1334,37 @@ def _extract_batch(
             merged_payload={},
         )
 
+    merge_fallback_used = False
+    merge_error_type: str | None = None
     if len(per_file_results) == 1:
         merged_payload = per_file_results[0].payload
     else:
-        merged_payload = strategy.batch_merger(
-            client,
-            model,
-            [(result.filename, result.payload) for result in per_file_results],
-        )
+        try:
+            merged_payload = strategy.batch_merger(
+                client,
+                model,
+                [(result.filename, result.payload) for result in per_file_results],
+            )
+        except Exception as exc:
+            logger.warning(
+                "%s LLM batch merge failed (batch=%d): error_type=%s; applying deterministic fallback",
+                strategy.name,
+                batch_index,
+                type(exc).__name__,
+            )
+            merge_fallback_used = True
+            merge_error_type = type(exc).__name__
+            merged_payload = _first_non_null_merge(
+                [result.payload for result in per_file_results if result.payload]
+            )
 
     return BatchExtractionResult(
         batch_index=batch_index,
         files=[source_file.original_filename for source_file in source_files],
         per_file_results=per_file_results,
         merged_payload=merged_payload,
+        merge_fallback_used=merge_fallback_used,
+        merge_error_type=merge_error_type,
     )
 
 
@@ -1449,7 +1484,17 @@ def _build_cross_validation_summary(
     resolved_fields: set[str],
     conflicts: list[dict[str, Any]],
     fallback_used: bool,
+    batch_results: list[BatchExtractionResult],
 ) -> dict[str, Any]:
+    batch_merge_errors = [
+        {
+            "batch_index": batch.batch_index,
+            "error_type": batch.merge_error_type,
+            "files": batch.files,
+        }
+        for batch in batch_results
+        if batch.merge_fallback_used
+    ]
     return {
         "batch_size": batch_size,
         "batch_count": batch_count,
@@ -1457,6 +1502,8 @@ def _build_cross_validation_summary(
         "resolved_fields": sorted(resolved_fields),
         "conflicts": conflicts,
         "fallback_used": fallback_used,
+        "batch_merge_fallback_used": bool(batch_merge_errors),
+        "batch_merge_errors": batch_merge_errors,
     }
 
 
@@ -1491,13 +1538,14 @@ def _run_llm_extraction(
     t0 = time.monotonic()
     batch_results: list[BatchExtractionResult] = []
     for batch_index, batch in enumerate(batches):
+        effective_concurrency = _effective_batch_concurrency(batch, max_concurrency)
         batch_result = _extract_batch(
             strategy,
             client,
             model,
             batch_index,
             batch,
-            max_concurrency,
+            effective_concurrency,
         )
         batch_results.append(batch_result)
         logger.info(
@@ -1565,6 +1613,7 @@ def _run_llm_extraction(
             resolved_fields=resolved_fields,
             conflicts=conflicts,
             fallback_used=fallback_used,
+            batch_results=batch_results,
         ),
     )
 

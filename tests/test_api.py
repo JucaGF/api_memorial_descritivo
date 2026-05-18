@@ -980,20 +980,8 @@ class GlpV2RouteTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.client = TestClient(app)
 
-    @patch("app.api.routes.get_settings")
-    def test_glp_v2_disabled_returns_404(self, get_settings_mock) -> None:
-        get_settings_mock.return_value = MagicMock(glp_v2_enabled=False)
-        response = self.client.post(
-            "/api/v1/memoriais/glp/v2/from-files",
-            files=[("files", ("a.pdf", b"%PDF-1.4 x", "application/pdf"))],
-        )
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()["error"]["code"], "glp_v2_disabled")
-
-    @patch("app.api.routes.get_settings")
     @patch("app.api.routes.GLP_V2_TEMPLATE_PATH")
-    def test_glp_v2_missing_template_returns_503(self, template_path_mock, get_settings_mock) -> None:
-        get_settings_mock.return_value = MagicMock(glp_v2_enabled=True)
+    def test_glp_v2_missing_template_returns_503(self, template_path_mock) -> None:
         template_path_mock.is_file.return_value = False
         response = self.client.post(
             "/api/v1/memoriais/glp/v2/from-files",

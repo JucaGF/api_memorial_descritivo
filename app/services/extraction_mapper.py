@@ -630,8 +630,8 @@ def _extract_glp_qtd_fogao(text: str) -> FieldExtraction | None:
     return _extract_glp_quantity_from_patterns(
         text=text,
         patterns=(
-            r"(\d+)\s*fog(?:[ãa]o|[õo]es?)\b",
-            r"fog(?:[ãa]o|[õo]es?)\s*[:\-]?\s*(\d+)\b",
+            r"(?<![\d.,])(\d+)\s*fog(?:[ãa]o|[õo]es?)\b",
+            r"fog(?:[ãa]o|[õo]es?)\s*[:\-]?\s*(\d+)\b(?![,.]\d)",
         ),
         rule="glp_fogao_count_regex",
     )
@@ -663,8 +663,8 @@ def _extract_glp_qtd_churrasqueira(text: str) -> FieldExtraction | None:
     return _extract_glp_quantity_from_patterns(
         text=text,
         patterns=(
-            r"(\d+)\s*churrasqueiras?\b",
-            r"churrasqueiras?\s*[:\-]?\s*(\d+)\b",
+            r"(?<![\d.,])(\d+)\s*churrasqueiras?\b",
+            r"churrasqueiras?\s*[:\-]?\s*(\d+)\b(?![,.]\d)",
         ),
         rule="glp_churrasqueira_count_regex",
     )
