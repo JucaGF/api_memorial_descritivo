@@ -537,6 +537,18 @@ class TemGeradorHeuristicTests(unittest.TestCase):
 
 
 class GlpV2MapperTests(unittest.TestCase):
+    def test_map_does_not_read_decimal_heights_as_point_quantities(self) -> None:
+        raw = """
+        Vista frontal ponto gás p/ fogão 0.60 Fogão 0.60 Fogão.
+        Ramal secundário 16mm.
+        0,30 Churrasqueira 7.000 Kcal/h.
+        """
+        result = map_extraction_to_partial_glp_v2_context(build_extraction_result(raw))
+        dimensionamento = result.context.get("dimensionamento", {})
+
+        self.assertNotIn("qtd_fogao", dimensionamento)
+        self.assertNotIn("qtd_churrasqueira", dimensionamento)
+
     def test_map_fills_main_diameter_near_ramal_keyword(self) -> None:
         raw = """
         Ramal primário em aço carbono com tubo 1 1/4" até o abrigo GLP.

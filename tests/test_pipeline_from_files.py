@@ -22,6 +22,7 @@ from app.services.pipeline_from_files import (
     _normalize_glp_context,
     _fill_gaps,
     extract_mapping_from_ingested_files,
+    extract_glp_v2_mapping_from_ingested_files,
     extract_glp_mapping_from_ingested_files,
     extract_gas_natural_mapping_from_ingested_files,
     extract_telecom_mapping_from_ingested_files,
@@ -34,6 +35,10 @@ from app.services.pipeline_from_files import (
     generate_memorial_eletrico_v1_from_uploaded_files,
 )
 from app.services.project_extractor import ExtractedSourceFile, ProjectExtractionResult
+from app.services.quantitative_extraction import (
+    QuantitativeCandidate,
+    resolve_glp_v2_quantitatives,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +60,62 @@ def build_extraction_result() -> ProjectExtractionResult:
         raw_text="CONSTRUTORA: Exemplo Engenharia LTDA",
         source_files=[],
         signals={"total_files": 1},
+    )
+
+
+def build_glp_v2_quantitative_extraction_result() -> ProjectExtractionResult:
+    tipo = """
+    QUADRO DE QUANTITATIVO MEDIÇÃO
+    1º AO 7º PAVIMENTO - (07 PAV X 04 APTOS [02 PONTOS] = 56 PONTOS)
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    0.60 Fogão 0,30 Churrasqueira
+    """
+    pavimentos_superiores = """
+    7º E 8º PAVIMENTO
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    """
+    terreo = """
+    TÉRREO
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
+    """
+    return ProjectExtractionResult(
+        raw_text="\n".join([tipo, pavimentos_superiores, terreo]),
+        source_files=[
+            ExtractedSourceFile(
+                original_filename="03_tipo.pdf",
+                stored_filename="03_tipo.pdf",
+                extension=".pdf",
+                saved_path="/tmp/03_tipo.pdf",
+                extracted_text=tipo,
+            ),
+            ExtractedSourceFile(
+                original_filename="04_7_e_8_pavimento.pdf",
+                stored_filename="04_7_e_8_pavimento.pdf",
+                extension=".pdf",
+                saved_path="/tmp/04_7_e_8_pavimento.pdf",
+                extracted_text=pavimentos_superiores,
+            ),
+            ExtractedSourceFile(
+                original_filename="02_terreo.pdf",
+                stored_filename="02_terreo.pdf",
+                extension=".pdf",
+                saved_path="/tmp/02_terreo.pdf",
+                extracted_text=terreo,
+            ),
+        ],
+        signals={"total_files": 3},
     )
 
 
@@ -120,6 +181,14 @@ class ExtractionReportPayloadTests(unittest.TestCase):
                 "resolved_fields": ["obra.construtora"],
                 "conflicts": [{"field_path": "obra.construtora"}],
                 "fallback_used": True,
+                "batch_merge_fallback_used": True,
+                "batch_merge_errors": [
+                    {
+                        "batch_index": 0,
+                        "error_type": "TimeoutError",
+                        "files": ["a.pdf", "b.pdf"],
+                    }
+                ],
             },
         )
 
@@ -130,6 +199,11 @@ class ExtractionReportPayloadTests(unittest.TestCase):
 
         self.assertEqual(payload["cross_validation"]["batch_size"], 5)
         self.assertTrue(payload["cross_validation"]["fallback_used"])
+        self.assertTrue(payload["cross_validation"]["batch_merge_fallback_used"])
+        self.assertEqual(
+            payload["cross_validation"]["batch_merge_errors"][0]["error_type"],
+            "TimeoutError",
+        )
         self.assertEqual(payload["conflicts"], [{"type": "glp_total_points_conflict"}])
 
 
@@ -196,6 +270,51 @@ class LLMPrimaryPathTests(unittest.TestCase):
 
         self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Corp")
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
+
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_eletrico_mapper_corrects_generator_false_positive_from_legend(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = ProjectExtractionResult(
+            raw_text="Legenda: simbolo de gerador conforme ABNT, sem painel de gerador instalado.",
+            source_files=[],
+            signals={"total_files": 1},
+        )
+        llm_context = {
+            "gerador": {
+                "tem_gerador": True,
+                "qtd": 1,
+                "potencia_kva": 250,
+                "tipo_atendimento": "condominio",
+            }
+        }
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
+        assess_mock.return_value = build_extraction_report()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, report = extract_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(
+            result_mapping.context["gerador"],
+            {
+                "tem_gerador": False,
+                "qtd": 0,
+                "potencia_kva": 0,
+                "tipo_atendimento": "condominio",
+            },
+        )
+        self.assertEqual(
+            report.cross_validation["quantitative_resolutions"][0]["field_path"],
+            "gerador.tem_gerador",
+        )
 
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
     @patch("app.services.pipeline_from_files.extract_with_llm_result")
@@ -340,6 +459,59 @@ class LLMPrimaryPathTests(unittest.TestCase):
 
         self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Gas")
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
+
+    @patch("app.services.pipeline_from_files.assess_gas_natural_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_gas_natural_reconciles_authoritative_quantitative_mapper_values(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extraction_result = ProjectExtractionResult(
+            raw_text=(
+                "PROJETO DE INSTALAÇÕES DE GÁS NATURAL\n"
+                "FOGÃO: 4\n"
+                "0 aquecedores\n"
+                "CHURRASQUEIRA: 1\n"
+                "( 1 PAVIMENTO = 5 PONTOS )\n"
+            ),
+            source_files=[],
+            signals={"total_files": 1},
+        )
+        llm_context = {
+            "obra": {"construtora": "LLM Gas"},
+            "dimensionamento": {
+                "qtd_fogao": 3,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 1,
+            },
+            "soma": {"qtd_pontos_de_utilizacao": 999},
+        }
+
+        extract_files_mock.return_value = extraction_result
+        extract_llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
+        assess_mock.return_value = build_extraction_report()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, report = extract_gas_natural_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["dimensionamento"]["qtd_fogao"], 4)
+        self.assertEqual(result_mapping.context["dimensionamento"]["qtd_aquecedor"], 0)
+        self.assertEqual(result_mapping.context["dimensionamento"]["qtd_churrasqueira"], 1)
+        self.assertEqual(result_mapping.context["soma"]["qtd_pontos_de_utilizacao"], 5)
+        self.assertEqual(
+            {
+                item["field_path"]
+                for item in report.cross_validation["quantitative_resolutions"]
+            },
+            {
+                "dimensionamento.qtd_fogao",
+                "soma.qtd_pontos_de_utilizacao",
+            },
+        )
 
     @patch("app.services.pipeline_from_files.assess_gas_natural_extraction_coverage")
     @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm_result")
@@ -1259,6 +1431,233 @@ class FillGapsTests(unittest.TestCase):
 class GlpV2AssemblyTests(unittest.TestCase):
     """MAKAI-style regression shape: 1 tank, 29 apts, 35+35 points, 1 1/4\" pipe (no project name hardcoding)."""
 
+    def test_quantitative_resolver_prefers_authoritative_point_candidates(self) -> None:
+        merged = {
+            "obra": {"qtd_apartamentos": 29},
+            "dimensionamento": {
+                "qtd_fogao": 28,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 28,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {
+                "fogao": 28,
+                "churrasqueira": 28,
+                "total_extraido": 61,
+            },
+        }
+        authoritative_candidates = [
+            QuantitativeCandidate(
+                field_path="pontos_utilizacao.fogao",
+                value=35,
+                unit="un",
+                entity="fogao",
+                memorial_type="glp_v2",
+                source_file="corte.pdf",
+                page_number=1,
+                source_kind="installed_quantity_table",
+                extraction_method="deterministic_visual_evidence",
+                evidence_text="35 pontos de fogão instalados",
+                confidence="high",
+            ),
+            QuantitativeCandidate(
+                field_path="pontos_utilizacao.churrasqueira",
+                value=35,
+                unit="un",
+                entity="churrasqueira",
+                memorial_type="glp_v2",
+                source_file="corte.pdf",
+                page_number=1,
+                source_kind="installed_quantity_table",
+                extraction_method="deterministic_visual_evidence",
+                evidence_text="35 pontos de churrasqueira instalados",
+                confidence="high",
+            ),
+        ]
+
+        result = resolve_glp_v2_quantitatives(
+            merged,
+            [],
+            extra_candidates=authoritative_candidates,
+        )
+
+        self.assertEqual(result.dimensionamento["qtd_fogao"], 35)
+        self.assertEqual(result.dimensionamento["qtd_churrasqueira"], 35)
+        self.assertEqual(result.pontos_utilizacao["total_calculado"], 70)
+        self.assertFalse(
+            [conflict for conflict in result.conflicts if conflict.get("status") == "unresolved"]
+        )
+        self.assertEqual(
+            result.conflicts[0]["resolucao"],
+            "glp_v2_authoritative_individual_points",
+        )
+
+    def test_quantitative_resolver_returns_auditable_resolution_for_even_total_split(self) -> None:
+        merged = {
+            "obra": {"qtd_apartamentos": 29},
+            "dimensionamento": {
+                "qtd_fogao": 30,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 4,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {
+                "fogao": 30,
+                "churrasqueira": 4,
+                "total_extraido": 70,
+            },
+        }
+
+        result = resolve_glp_v2_quantitatives(merged, [])
+
+        self.assertEqual(result.dimensionamento["qtd_fogao"], 35)
+        self.assertEqual(result.dimensionamento["qtd_churrasqueira"], 35)
+        self.assertEqual(result.pontos_utilizacao["total_calculado"], 70)
+        self.assertEqual(result.conflicts[0]["status"], "resolved")
+        self.assertEqual(result.conflicts[0]["tipo"], "glp_v2_points_total_mismatch")
+        point_resolution = next(
+            item for item in result.resolutions
+            if item["rule"] == "glp_v2_even_total_split"
+        )
+        self.assertEqual(point_resolution["field_path"], "pontos_utilizacao.total_calculado")
+        self.assertGreaterEqual(len(point_resolution["candidates"]), 3)
+
+    def test_assemble_drops_mapper_apartment_proxy_conflict_when_final_points_differ(self) -> None:
+        merged = {
+            "obra": {
+                "numero_cadastro": "X",
+                "construtora": "C",
+                "nome": "N",
+                "localizacao": "L",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": 29,
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 35,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 35,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {"total_extraido": 70},
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_material": "aço carbono",
+                "primario_pavimento": "térreo",
+            },
+            "numero": {"prancha": "01/04"},
+            "teto_ou_piso": "piso",
+        }
+        mapper_conflict = {
+            "tipo": "glp_v2_fogao_apartamentos_colision",
+            "status": "unresolved",
+            "valores_observados": [29],
+            "fontes": ["glp_fogao_count_regex", "qtd_apartamentos"],
+        }
+
+        out = _assemble_glp_v2_payload(merged, [mapper_conflict])
+
+        self.assertEqual(out["pontos_utilizacao"]["fogao"], 35)
+        self.assertEqual(out["obra"]["qtd_apartamentos"]["valor"], 29)
+        self.assertEqual(out["pontos_utilizacao"]["conflitos"], [])
+
+    def test_assemble_resolves_even_total_mismatch_for_fogao_and_churrasqueira_only(self) -> None:
+        merged = {
+            "obra": {
+                "numero_cadastro": "X",
+                "construtora": "C",
+                "nome": "N",
+                "localizacao": "L",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": 29,
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 30,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 4,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {
+                "fogao": 30,
+                "churrasqueira": 4,
+                "total_extraido": 70,
+            },
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_material": "aço carbono",
+                "primario_pavimento": "térreo",
+            },
+            "numero": {"prancha": "01/04"},
+            "teto_ou_piso": "piso",
+        }
+
+        out = _assemble_glp_v2_payload(merged, [])
+
+        self.assertEqual(out["pontos_utilizacao"]["fogao"], 35)
+        self.assertEqual(out["pontos_utilizacao"]["churrasqueira"], 35)
+        self.assertEqual(out["pontos_utilizacao"]["total_calculado"], 70)
+        self.assertEqual(
+            out["pontos_utilizacao"]["conflitos"][0]["status"],
+            "resolved",
+        )
+        self.assertEqual(
+            out["pontos_utilizacao"]["conflitos"][0]["resolucao"],
+            "glp_v2_even_total_split",
+        )
+
+    def test_assemble_keeps_unresolved_total_mismatch_when_even_split_is_not_safe(self) -> None:
+        merged = {
+            "obra": {
+                "numero_cadastro": "X",
+                "construtora": "C",
+                "nome": "N",
+                "localizacao": "L",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": 29,
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 30,
+                "qtd_aquecedor": 1,
+                "qtd_churrasqueira": 4,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {
+                "fogao": 30,
+                "churrasqueira": 4,
+                "aquecedor": 1,
+                "total_extraido": 70,
+            },
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_material": "aço carbono",
+                "primario_pavimento": "térreo",
+            },
+            "numero": {"prancha": "01/04"},
+            "teto_ou_piso": "piso",
+        }
+
+        out = _assemble_glp_v2_payload(merged, [])
+
+        self.assertEqual(out["pontos_utilizacao"]["total_calculado"], 35)
+        self.assertEqual(
+            out["pontos_utilizacao"]["conflitos"][0]["status"],
+            "unresolved",
+        )
+
     def test_assemble_matches_expected_fixture_subset(self) -> None:
         merged = {
             "obra": {
@@ -1303,6 +1702,69 @@ class GlpV2AssemblyTests(unittest.TestCase):
             expected["diametros"]["tubulacao_principal"]["valor_formatado"],
         )
         self.assertTrue(out["diametros"]["valvula_esfera"].get("inferido"))
+
+    @patch("app.services.pipeline_from_files.is_llm_extraction_enabled", return_value=True)
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_v2_context")
+    @patch("app.services.pipeline_from_files.extract_glp_v2_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_v2_extraction_report_includes_quantitative_resolutions(
+        self,
+        extract_project_mock,
+        llm_mock,
+        mapper_mock,
+        _enabled_mock,
+    ) -> None:
+        merged = {
+            "obra": {
+                "numero_cadastro": "X",
+                "construtora": "C",
+                "nome": "N",
+                "localizacao": "L",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": 29,
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 28,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 28,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {
+                "fogao": 28,
+                "churrasqueira": 28,
+                "total_extraido": 61,
+            },
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_material": "aço carbono",
+                "primario_pavimento": "térreo",
+            },
+            "numero": {"prancha": "01/04"},
+            "teto_ou_piso": "piso",
+        }
+        extract_project_mock.return_value = build_glp_v2_quantitative_extraction_result()
+        llm_mock.return_value = LLMExtractionRunResult(
+            context=merged,
+            cross_validation={"batch_count": 1},
+        )
+        mapper_mock.return_value = MappingResult(context={}, evidence={})
+
+        mapping, report = extract_glp_v2_mapping_from_ingested_files([build_ingested_file()])
+
+        self.assertEqual(mapping.context["pontos_utilizacao"]["fogao"], 35)
+        self.assertEqual(mapping.context["pontos_utilizacao"]["churrasqueira"], 35)
+        self.assertIsNotNone(report.cross_validation)
+        quantitative = report.cross_validation["quantitative_resolutions"]
+        point_resolution = next(
+            item for item in quantitative
+            if item["rule"] == "glp_v2_authoritative_individual_points"
+        )
+        self.assertEqual(point_resolution["selected_value"], 70)
 
 
 if __name__ == "__main__":

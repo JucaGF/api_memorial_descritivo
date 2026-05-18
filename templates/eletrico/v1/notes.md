@@ -28,7 +28,7 @@ Os placeholders são organizados por domínio:
 - O documento final não deve conter tags Jinja visíveis.
 - O documento final não deve conter observações internas.
 - A numeração das seções está fixa no texto.
-- O sumário é manual/estático, exceto as entradas 4.2 e 4.2.1 que são condicionais (controladas por `energia.tem_subestacao`).
+- O sumário é manual/estático, exceto as entradas 4.2 e 4.2.1 que são condicionais (controladas por `energia.tem_subestacao`) e a entrada de grupo gerador, condicionada por `gerador.tem_gerador`.
 - O comportamento da seção 4.4 será ignorado nesta versão.
 
 ## Seções condicionais
@@ -40,6 +40,14 @@ Controla:
 - exibição da seção 4.2.1
 - trecho de MT em 4.5
 - trecho de barramento MT em 4.7
+
+### `gerador.tem_gerador`
+Controla:
+- entrada de sumário da seção de luz essencial / grupo gerador
+- frase geral sobre sistema de geração de emergência
+- seção "INSTALAÇÃO DE LUZ ESSENCIAL (GRUPO GERADOR)"
+
+Quando `false`, o template não deve renderizar textos de grupo gerador. O `context_builder` deriva esse campo a partir de `gerador.qtd` para preservar payloads legados.
 
 ### `gerador.tipo_atendimento`
 Valores aceitos:
@@ -102,6 +110,7 @@ Usado no template atual:
 - `aterramento.local_bep`
 
 ### gerador
+- `gerador.tem_gerador`
 - `gerador.qtd`
 - `gerador.potencia_kva`
 - `gerador.tipo_atendimento`
@@ -126,5 +135,6 @@ Se `gerador.tipo_atendimento = parcial`, exigir:
 - gerador atendendo edifício
 - gerador atendendo condomínio
 - gerador com atendimento parcial
+- sem gerador (`gerador.tem_gerador = false`) omitindo seção e textos de grupo gerador
 - seção 4.12 sem itens marcados
 - seção 4.12 com múltiplos itens marcados

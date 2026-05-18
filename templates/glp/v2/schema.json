@@ -192,6 +192,11 @@
           "type": "array",
           "items": {}
         },
+        "valor_selecionado": {},
+        "resolucao": {
+          "type": "string",
+          "description": "Regra determinística usada para resolver o conflito, quando status=resolved."
+        },
         "fontes": {
           "type": "array",
           "items": {"type": "string"}

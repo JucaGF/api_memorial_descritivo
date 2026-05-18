@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from io import BytesIO
 from datetime import datetime, timezone
@@ -37,7 +38,73 @@ def _memorial(memorial_id: str = "abc-123", memorial_type: str = "telecom") -> G
     )
 
 
+def _request(method: str = "GET", path: str = "/api/v1/memoriais") -> MagicMock:
+    request = MagicMock()
+    request.state.request_id = "req-123"
+    request.method = method
+    request.url.path = path
+    return request
+
+
 class GeneratedMemorialApiTests(unittest.TestCase):
+    def test_validation_error_response_uses_quantitative_conflict_code(self) -> None:
+        error = MemorialValidationError(
+            issues=[
+                ValidationIssue(
+                    path="$.pontos_utilizacao.conflitos",
+                    message="Conflitos criticos GLP v2 sem resolucao.",
+                    validator="glp_v2_conflict",
+                )
+            ],
+            extraction_report={
+                "conflicts": [
+                    {
+                        "tipo": "glp_v2_points_total_mismatch",
+                        "status": "unresolved",
+                        "valores_observados": [61, 56],
+                    }
+                ]
+            },
+        )
+
+        response = routes._validation_error_response(
+            error,
+            "Payload invalido para o memorial GLP v2.",
+            request=_request("POST", "/api/v1/memoriais/glp/v2/from-files/persist"),
+        )
+
+        body = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(body["detail"], body["error"]["message"])
+        self.assertEqual(body["error"]["code"], "quantitative_conflict_unresolved")
+        self.assertIn("valores diferentes", body["error"]["message"])
+        self.assertEqual(
+            body["conflicts"][0]["tipo"],
+            "glp_v2_points_total_mismatch",
+        )
+        self.assertEqual(body["errors"][0]["validator"], "glp_v2_conflict")
+        self.assertEqual(
+            body["error"]["details"]["conflicts"][0]["valores_observados"],
+            [61, 56],
+        )
+        self.assertIn("extraction_report", body)
+
+    def test_extract_conflicts_from_report_reads_quantitative_conflicts(self) -> None:
+        report = {
+            "cross_validation": {
+                "quantitative_conflicts": [
+                    {
+                        "tipo": "glp_v2_points_total_mismatch",
+                        "status": "resolved",
+                    }
+                ]
+            }
+        }
+
+        conflicts = routes._extract_conflicts_from_report(report)
+
+        self.assertEqual(conflicts, report["cross_validation"]["quantitative_conflicts"])
+
     def test_cors_allows_local_vite_frontend_origin(self) -> None:
         cors_middleware = next(
             middleware
@@ -179,26 +246,38 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memoriais_lists_persisted_memorials(self, list_mock) -> None:
         list_mock.return_value = [_memorial()]
 
-        response = routes.list_persisted_memorials(type="telecom")
+        response = routes.list_persisted_memorials(_request(), type="telecom")
 
         self.assertEqual(len(response.memorials), 1)
         self.assertEqual(response.memorials[0].type, "telecom")
         list_mock.assert_called_once_with("telecom")
 
+    @patch("app.api.routes.list_generated_memorials")
+    def test_get_memoriais_accepts_glp_v2_filter(self, list_mock) -> None:
+        list_mock.return_value = [_memorial(memorial_type="glp_v2")]
+
+        response = routes.list_persisted_memorials(_request(), type="glp_v2")
+
+        self.assertEqual(len(response.memorials), 1)
+        self.assertEqual(response.memorials[0].type, "glp_v2")
+        list_mock.assert_called_once_with("glp_v2")
+
     @patch("app.api.routes.get_generated_memorial")
     def test_get_memorial_returns_404_for_unknown_id(self, get_mock) -> None:
         get_mock.return_value = None
 
-        response = routes.get_persisted_memorial("missing")
+        response = routes.get_persisted_memorial("missing", _request())
 
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.body.decode("utf-8"), '{"detail":"Memorial não encontrado."}')
+        body = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(body["detail"], "Memorial não encontrado.")
+        self.assertEqual(body["error"]["code"], "generated_memorial_not_found")
 
     @patch("app.api.routes.get_generated_memorial")
     def test_get_memorial_returns_detail(self, get_mock) -> None:
         get_mock.return_value = _memorial()
 
-        response = routes.get_persisted_memorial("abc-123")
+        response = routes.get_persisted_memorial("abc-123", _request())
 
         self.assertEqual(response.id, "abc-123")
 
@@ -313,7 +392,9 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_delete_memorial_returns_204_when_deleted(self, delete_mock) -> None:
         delete_mock.return_value = True
 
-        response = routes.delete_persisted_memorial("abc-123", MagicMock())
+        response = routes.delete_persisted_memorial(
+            "abc-123", _request("DELETE", "/api/v1/memoriais/abc-123")
+        )
 
         self.assertEqual(response.status_code, 204)
         delete_mock.assert_called_once_with("abc-123")
@@ -322,10 +403,14 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_delete_memorial_returns_404_when_missing(self, delete_mock) -> None:
         delete_mock.return_value = False
 
-        response = routes.delete_persisted_memorial("missing", MagicMock())
+        response = routes.delete_persisted_memorial(
+            "missing", _request("DELETE", "/api/v1/memoriais/missing")
+        )
 
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.body.decode("utf-8"), '{"detail":"Memorial não encontrado."}')
+        body = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(body["detail"], "Memorial não encontrado.")
+        self.assertEqual(body["error"]["code"], "generated_memorial_not_found")
 
     @patch("app.api.routes.delete_generated_memorial")
     def test_delete_memorial_returns_safe_503_for_storage_failure(self, delete_mock) -> None:
@@ -397,7 +482,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memorial_with_include_context_propagates_flag(self, get_mock) -> None:
         get_mock.return_value = _memorial()
 
-        routes.get_persisted_memorial("abc-123", include_context=True)
+        routes.get_persisted_memorial("abc-123", _request(), include_context=True)
 
         get_mock.assert_called_once_with("abc-123", include_context=True)
 
@@ -405,7 +490,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memorial_default_does_not_request_context(self, get_mock) -> None:
         get_mock.return_value = _memorial()
 
-        routes.get_persisted_memorial("abc-123")
+        routes.get_persisted_memorial("abc-123", _request())
 
         get_mock.assert_called_once_with("abc-123", include_context=False)
 

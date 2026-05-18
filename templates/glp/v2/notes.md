@@ -1,10 +1,10 @@
-# Template GLP v2 (em desenvolvimento)
+# Template GLP v2
 
 ## Status
 
 **Schema:** definido em `schema.json`.
 
-**Template DOCX:** **AINDA NÃO AUTORIZADO**. Este arquivo binário precisa ser criado/editado no Microsoft Word com os novos placeholders Jinja antes que a rota `POST /api/v1/memoriais/glp/v2/from-files` possa servir documentos. Enquanto o arquivo `template.docx` desta pasta não existir, a rota v2 (atrás da feature flag `GLP_V2_ENABLED=true`) retorna 503 com `code=glp_v2_template_pending`.
+**Template DOCX:** definido em `template.docx` com placeholders Jinja alinhados ao schema v2. As rotas `POST /api/v1/memoriais/glp/v2/from-files` e `/from-files/persist` ficam disponíveis naturalmente; se o arquivo `template.docx` for removido em algum ambiente, a rota retorna 503 com `code=glp_v2_template_pending`.
 
 ## Diferenças vs GLP v1
 
@@ -45,12 +45,11 @@ A unidade do diâmetro é **explícita** (`"in"` ou `"mm"`) e nunca inferida do 
 - Schema rejeita contexto sem `tanques.quantidade`.
 - Schema rejeita contexto com `diametros.tubulacao_principal.unidade` fora do enum.
 - Schema rejeita contexto sem `context_version`/`template_version`.
-- Render falha se `template.docx` v2 ainda não existir (cenário esperado durante a transição).
+- Render GLP v2 preserva diâmetros em polegadas via `valor_formatado` e não concatena unidade fixa (`mm` ou `"`).
+- Guarda de rota retorna 503 se `template.docx` v2 não existir no ambiente.
 
 ## Roadmap
 
-1. **Você** cria `templates/glp/v2/template.docx` no Word com os novos placeholders.
-2. Ligar `GLP_V2_ENABLED=true` em ambiente de teste.
-3. Validar render real com um projeto piloto.
-4. Comunicar dashboard/chatbot/site sobre `context_version` para usar a projeção correta.
-5. Eventualmente depreciar a rota v1 após período de coexistência.
+1. Validar render real com um projeto piloto.
+2. Comunicar dashboard/chatbot/site sobre `context_version` para usar a projeção correta.
+3. Eventualmente depreciar a rota v1 após período de coexistência.

@@ -86,6 +86,7 @@ DOCX_MEDIA_TYPE = (
 router = APIRouter()
 
 _SUPPORTED_MEMORIAL_TYPES = {"eletrico", "telecom", "gas-natural", "glp"}
+_SUPPORTED_MEMORIAL_LIST_TYPES = _SUPPORTED_MEMORIAL_TYPES | {"glp_v2"}
 _PROJECT_NAME_BY_TYPE = {
     "eletrico": "Memorial Elétrico",
     "telecom": "Memorial Telecom",
@@ -123,6 +124,9 @@ def _validation_error_response(
     detail: str,
     request: Request | None = None,
 ) -> JSONResponse:
+    if _is_unresolved_quantitative_conflict(error):
+        return _quantitative_conflict_error_response(error, request)
+
     issues = [
         {
             "path": issue.path,
@@ -249,7 +253,72 @@ def _extract_conflicts_from_report(extraction_report: dict[str, Any] | None) -> 
         inner = cross_validation.get("conflicts")
         if isinstance(inner, list):
             return inner
+        quantitative_conflicts = cross_validation.get("quantitative_conflicts")
+        if isinstance(quantitative_conflicts, list):
+            return quantitative_conflicts
     return []
+
+
+def _is_unresolved_quantitative_conflict(error: MemorialValidationError) -> bool:
+    if not isinstance(error.extraction_report, dict):
+        return False
+    conflicts = _extract_conflicts_from_report(error.extraction_report)
+    return any(
+        isinstance(conflict, dict)
+        and conflict.get("status") == "unresolved"
+        and (
+            "quantitative" in str(conflict.get("tipo", ""))
+            or "total" in str(conflict.get("tipo", ""))
+            or str(conflict.get("tipo", "")).startswith(
+                ("glp_", "gas_", "eletrico_", "telecom_")
+            )
+        )
+        for conflict in conflicts
+    )
+
+
+def _quantitative_conflict_error_response(
+    error: MemorialValidationError,
+    request: Request | None,
+) -> JSONResponse:
+    conflicts = _extract_conflicts_from_report(
+        error.extraction_report if isinstance(error.extraction_report, dict) else None
+    )
+    issues = [
+        {
+            "path": issue.path,
+            "message": issue.message,
+            "validator": issue.validator,
+        }
+        for issue in error.issues
+    ]
+    message = (
+        "Encontramos valores diferentes nos quantitativos do projeto. "
+        "A geração foi bloqueada para evitar um memorial incorreto."
+    )
+    request_id = get_request_id(request)
+    details = {
+        "issues": issues,
+        "conflicts": conflicts,
+        "extraction_report": error.extraction_report,
+    }
+    content: dict[str, Any] = {
+        "detail": message,
+        "errors": issues,
+        "conflicts": conflicts,
+        "error": {
+            "code": "quantitative_conflict_unresolved",
+            "message": message,
+            "details": details,
+        },
+        "extraction_report": error.extraction_report,
+    }
+    if request_id is not None:
+        content["error"]["request_id"] = request_id
+    response = JSONResponse(status_code=409, content=content)
+    if request_id is not None:
+        response.headers["X-Request-ID"] = request_id
+    return response
 
 
 def _validation_detail_for_type(memorial_type: str) -> str:
@@ -307,7 +376,7 @@ def _log_validation_failure(
     response_model=GeneratedMemorialListResponse,
 )
 def list_persisted_memorials(request: Request, type: str | None = None):
-    if type is not None and type not in _SUPPORTED_MEMORIAL_TYPES:
+    if type is not None and type not in _SUPPORTED_MEMORIAL_LIST_TYPES:
         return _unsupported_memorial_type_response(type, request=request)
     return GeneratedMemorialListResponse(memorials=list_generated_memorials(type))
 
@@ -1017,13 +1086,6 @@ async def create_memorial_glp_from_files(
 
 
 def _glp_v2_route_guard(request: Request) -> JSONResponse | None:
-    if not get_settings().glp_v2_enabled:
-        return build_client_error_response(
-            request=request,
-            status_code=404,
-            code="glp_v2_disabled",
-            message="GLP v2 esta desligado. Defina GLP_V2_ENABLED=true.",
-        )
     if not GLP_V2_TEMPLATE_PATH.is_file():
         return build_client_error_response(
             request=request,

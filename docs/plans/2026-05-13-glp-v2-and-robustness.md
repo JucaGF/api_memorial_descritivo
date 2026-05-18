@@ -15,22 +15,23 @@ Implementar o plano **GLP v2 backend robustness**: contrato GLP v2 versionado, p
 - **M7**: Modelos Pydantic v2, `GLP_V2_EXTRACTION_PROMPT` / merge, `extract_glp_v2_with_llm_result`.
 - **M8**: `map_extraction_to_partial_glp_v2_context`, diâmetros, guard fogão/apartamentos → `_glp_v2_critical_conflicts`.
 - **M9**: `_assemble_glp_v2_payload`, `generate_memorial_glp_v2_from_ingested_files`, fixture `glp_v2_makai_expected.json` (forma agnóstica de nome de projeto).
-- **M10**: `POST /api/v1/memoriais/glp/v2/from-files` e `/from-files/persist`, `GLP_V2_ENABLED`, 503 `glp_v2_template_pending` sem `template.docx`.
-- **M11**: `gerador.tem_gerador` opcional no schema elétrico, derivação no `context_builder`, `_extract_tem_gerador` + testes; `tipo_atendimento` pode ser `null` com gerador presente.
+- **M10**: `POST /api/v1/memoriais/glp/v2/from-files` e `/from-files/persist`, disponíveis sem feature flag; 503 `glp_v2_template_pending` sem `template.docx`.
+- **M12**: `templates/glp/v2/template.docx` criado com placeholders Jinja alinhados ao schema v2; render preserva `diametros.*.valor_formatado` sem concatenar unidade fixa.
+- **M11**: `gerador.tem_gerador` opcional no schema elétrico, derivação no `context_builder`, `_extract_tem_gerador` + testes; `tipo_atendimento` pode ser `null` com gerador presente; `template.docx` elétrico omite sumário/frase/seção de grupo gerador quando `tem_gerador=false`.
 - **Persistência**: tipo `glp_v2` / `memorial_glp_v2.docx` no storage.
 
 ## Pendências (fora do escopo deste repo)
 
-- Autoria manual de `templates/glp/v2/template.docx` no Word (binário).
 - Frontend `dashboard-memorial` (repo externo).
 - Aplicar migração 004 no Supabase em produção.
+- Backfill opcional de memoriais antigos sem `final_context`.
+- Ajuste visual/manual fino do DOCX no Word, se o time quiser aproximar o layout do modelo institucional.
 
 ## Verificação
 
-Testes direcionados executados com sucesso (validator GLP v2, mapper v2, resiliência de batch, limites de upload incluindo páginas PDF, rotas GLP v2, assembly + fixture MAKAI).
+Testes direcionados executados com sucesso (validator GLP v2, mapper v2, resiliência de batch, limites de upload incluindo páginas PDF, rotas GLP v2, assembly + fixture MAKAI, render GLP v2).
 
 `python -m unittest discover -s tests` na pasta `api_memorial_descritivo` pode ainda reportar falhas **pré-existentes do ambiente Windows / OneDrive**:
 
 - `PackageNotFoundError` ao renderizar memoriais quando `template.docx` é placeholder do OneDrive (download real do binário necessário).
 - `PermissionError` em `test_generated_memorial_store` com `NamedTemporaryFile` no Windows.
-

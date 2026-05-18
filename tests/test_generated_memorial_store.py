@@ -217,9 +217,10 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
 
         with NamedTemporaryFile(suffix=".docx", delete=False) as temp_file:
             temp_path = Path(temp_file.name)
+        created = None
         try:
             temp_path.write_bytes(b"PK\x03\x04docx")
-            store.create_generated_memorial(
+            created = store.create_generated_memorial(
                 memorial_type="glp",
                 project_name="Memorial GLP",
                 output_path=temp_path,
@@ -241,8 +242,12 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
         self.assertEqual(inserted["final_context"]["abastecimento"]["qtd_tanques"], 1)
         self.assertEqual(inserted["extraction_report"]["filled"], ["obra.nome"])
         self.assertEqual(inserted["conflicts"], [{"type": "demo", "status": "resolved"}])
+        self.assertIsNotNone(created)
+        self.assertIsNone(created.final_context)
+        self.assertEqual(created.extraction_report["filled"], ["obra.nome"])
+        self.assertEqual(created.conflicts, [{"type": "demo", "status": "resolved"}])
 
-    def test_list_generated_memorials_omits_final_context_for_payload_size(self) -> None:
+    def test_list_generated_memorials_omits_final_context_but_keeps_report_for_warnings(self) -> None:
         record = _record(memorial_type="glp")
         record["final_context"] = {"obra": {"nome": "X"}}
         record["extraction_report"] = {"filled": []}
@@ -257,8 +262,8 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         self.assertIsNone(result[0].final_context)
-        self.assertIsNone(result[0].extraction_report)
-        self.assertIsNone(result[0].conflicts)
+        self.assertEqual(result[0].extraction_report, {"filled": []})
+        self.assertEqual(result[0].conflicts, [{"type": "demo"}])
         self.assertEqual(result[0].context_version, "glp_v1")
         self.assertEqual(result[0].template_version, "glp_v1")
 
@@ -302,8 +307,8 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertIsNone(result.final_context)
-        self.assertIsNone(result.extraction_report)
-        self.assertIsNone(result.conflicts)
+        self.assertEqual(result.extraction_report, {"filled": ["obra.nome"]})
+        self.assertEqual(result.conflicts, [])
         self.assertEqual(result.context_version, "glp_v1")
 
 
