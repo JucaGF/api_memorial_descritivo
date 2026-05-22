@@ -64,10 +64,37 @@ def build_extraction_result() -> ProjectExtractionResult:
     )
 
 
+def build_schematic_apartment_extraction_result() -> ProjectExtractionResult:
+    return ProjectExtractionResult(
+        raw_text="",
+        source_files=[
+            ExtractedSourceFile(
+                original_filename="05_corte_esquematico.pdf",
+                stored_filename="05_corte_esquematico.pdf",
+                extension=".pdf",
+                saved_path="/tmp/05_corte_esquematico.pdf",
+                extracted_text="""
+                CORTE ESQUEMÁTICO
+                APTO 801
+                APTO 704 APTO 703 APTO 702 APTO 701
+                APTO 604 APTO 603 APTO 602 APTO 601
+                APTO 504 APTO 503 APTO 502 APTO 501
+                APTO 404 APTO 403 APTO 402 APTO 401
+                APTO 304 APTO 303 APTO 302 APTO 301
+                APTO 204 APTO 203 APTO 202 APTO 201
+                APTO 104 APTO 103 APTO 102 APTO 101
+                APTO 001
+                """,
+            )
+        ],
+        signals={"total_files": 1},
+    )
+
+
 def build_glp_v2_quantitative_extraction_result() -> ProjectExtractionResult:
     tipo = """
     QUADRO DE QUANTITATIVO MEDIÇÃO
-    1º AO 7º PAVIMENTO - (07 PAV X 04 APTOS [02 PONTOS] = 56 PONTOS)
+    1º AO 6º PAVIMENTO - (06 PAV X 04 APTOS [02 PONTOS] = 48 PONTOS)
     Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
     Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
     Fogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h
@@ -317,6 +344,31 @@ class LLMPrimaryPathTests(unittest.TestCase):
             "gerador.tem_gerador",
         )
 
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_eletrico_prefers_schematic_apartment_count_over_llm_value(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extract_files_mock.return_value = build_schematic_apartment_extraction_result()
+        extract_llm_mock.return_value = LLMExtractionRunResult(
+            context={"obra": {"construtora": "LLM Corp", "qtd_apartamentos": 30}}
+        )
+        assess_mock.return_value = build_extraction_report()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, report = extract_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["qtd_apartamentos"], 29)
+        self.assertEqual(
+            report.cross_validation["quantitative_resolutions"][0]["field_path"],
+            "obra.qtd_apartamentos",
+        )
+
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")
     @patch("app.services.pipeline_from_files.extract_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
@@ -399,6 +451,31 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Telecom")
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
 
+    @patch("app.services.pipeline_from_files.assess_telecom_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_telecom_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_telecom_prefers_schematic_apartment_count_over_llm_value(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extract_files_mock.return_value = build_schematic_apartment_extraction_result()
+        extract_llm_mock.return_value = LLMExtractionRunResult(
+            context={"obra": {"construtora": "LLM Telecom", "qtd_apartamentos": 30}}
+        )
+        assess_mock.return_value = build_extraction_report()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, report = extract_telecom_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["qtd_apartamentos"], 29)
+        self.assertEqual(
+            report.cross_validation["quantitative_resolutions"][0]["field_path"],
+            "obra.qtd_apartamentos",
+        )
+
     @patch("app.services.pipeline_from_files.assess_gas_natural_extraction_coverage")
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_gas_natural_context")
     @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm_result")
@@ -460,6 +537,31 @@ class LLMPrimaryPathTests(unittest.TestCase):
 
         self.assertEqual(result_mapping.context["obra"]["construtora"], "LLM Gas")
         self.assertEqual(result_mapping.context["obra"]["nome"], "Edifício Mapper")
+
+    @patch("app.services.pipeline_from_files.assess_gas_natural_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_gas_natural_prefers_schematic_apartment_count_over_llm_value(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extract_files_mock.return_value = build_schematic_apartment_extraction_result()
+        extract_llm_mock.return_value = LLMExtractionRunResult(
+            context={"obra": {"construtora": "LLM Gas", "qtd_apartamentos": 30}}
+        )
+        assess_mock.return_value = build_extraction_report()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, report = extract_gas_natural_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["qtd_apartamentos"], 29)
+        self.assertEqual(
+            report.cross_validation["quantitative_resolutions"][0]["field_path"],
+            "obra.qtd_apartamentos",
+        )
 
     @patch("app.services.pipeline_from_files.assess_gas_natural_extraction_coverage")
     @patch("app.services.pipeline_from_files.extract_gas_natural_with_llm_result")
@@ -601,6 +703,31 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(result_mapping.context["obra"]["tipo_edificacao"], "Residencial Multifamiliar")
         self.assertEqual(result_mapping.context["obra"]["qtd_lojas"], 0)
         self.assertEqual(result_mapping.context["dimensionamento"]["qtd_aquecedor"], 0)
+
+    @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_prefers_schematic_apartment_count_over_llm_value(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extract_files_mock.return_value = build_schematic_apartment_extraction_result()
+        extract_llm_mock.return_value = LLMExtractionRunResult(
+            context={"obra": {"construtora": "LLM GLP", "qtd_apartamentos": 30}}
+        )
+        assess_mock.return_value = build_extraction_report()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, report = extract_glp_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["qtd_apartamentos"], 29)
+        self.assertEqual(
+            report.cross_validation["quantitative_resolutions"][0]["field_path"],
+            "obra.qtd_apartamentos",
+        )
 
     @patch("app.services.pipeline_from_files.assess_glp_extraction_coverage")
     @patch("app.services.pipeline_from_files.extract_glp_with_llm_result")
@@ -1567,6 +1694,89 @@ class GlpV2AssemblyTests(unittest.TestCase):
         )
 
         self.assertEqual(result.obra["qtd_apartamentos"], 29)
+
+    def test_quantitative_candidates_sum_fogao_from_floor_plans_ignoring_schematic_cut(self) -> None:
+        four_fogao_labels = "\n".join(["Fogão 7.000 Kcal/h"] * 4)
+        seven_fogao_labels = "\n".join(["Fogão 7.000 Kcal/h"] * 7)
+        extraction_result = ProjectExtractionResult(
+            raw_text="",
+            source_files=[
+                ExtractedSourceFile(
+                    original_filename="03_tipo.pdf",
+                    stored_filename="03_tipo.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/03_tipo.pdf",
+                    extracted_text=f"1º AO 6º PAVIMENTO\n{four_fogao_labels}",
+                ),
+                ExtractedSourceFile(
+                    original_filename="02_terreo.pdf",
+                    stored_filename="02_terreo.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/02_terreo.pdf",
+                    extracted_text=f"TÉRREO\n{four_fogao_labels}",
+                ),
+                ExtractedSourceFile(
+                    original_filename="04_7_e_8_pavimento.pdf",
+                    stored_filename="04_7_e_8_pavimento.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/04_7_e_8_pavimento.pdf",
+                    extracted_text=f"7º E 8º PAVIMENTO\n{seven_fogao_labels}",
+                ),
+                ExtractedSourceFile(
+                    original_filename="05_corte_esquematico.pdf",
+                    stored_filename="05_corte_esquematico.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/05_corte_esquematico.pdf",
+                    extracted_text="CORTE ESQUEMÁTICO\nFogão 7.000 Kcal/h",
+                ),
+            ],
+            signals={"total_files": 4},
+        )
+
+        candidates = extract_glp_v2_quantitative_candidates(extraction_result)
+        fogao = next(
+            candidate for candidate in candidates
+            if candidate.field_path == "pontos_utilizacao.fogao"
+            and not candidate.is_reference_only
+        )
+
+        self.assertEqual(fogao.value, 35)
+        self.assertEqual(
+            [part["value"] for part in fogao.scope["parts"]],
+            [24, 4, 7],
+        )
+        self.assertNotIn("corte", fogao.evidence_text.lower())
+
+    def test_quantitative_candidates_treat_floor_plan_with_detail_callouts_as_installed_source(self) -> None:
+        four_fogao_labels = "\n".join(["Fogão 7.000 Kcal/h"] * 4)
+        extraction_result = ProjectExtractionResult(
+            raw_text="",
+            source_files=[
+                ExtractedSourceFile(
+                    original_filename="03_tipo.pdf",
+                    stored_filename="03_tipo.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/03_tipo.pdf",
+                    extracted_text=(
+                        "1º AO 7º PAVIMENTO\n"
+                        "ELEVAÇÃO - MEDIÇÃO/GÁS (GLP) - DETALHE 01\n"
+                        f"{four_fogao_labels}\n"
+                        "PLANTA BAIXA PAVIMENTO TIPO (1º AO 6º)"
+                    ),
+                )
+            ],
+            signals={"total_files": 1},
+        )
+
+        candidates = extract_glp_v2_quantitative_candidates(extraction_result)
+        fogao = next(
+            candidate for candidate in candidates
+            if candidate.field_path == "pontos_utilizacao.fogao"
+            and not candidate.is_reference_only
+        )
+
+        self.assertEqual(fogao.value, 24)
+        self.assertEqual(fogao.scope["parts"][0]["evidence"], "4 rotulos x 6 pavimentos")
 
     def test_quantitative_resolver_flags_visual_apartment_ids_as_unresolved(self) -> None:
         merged = {

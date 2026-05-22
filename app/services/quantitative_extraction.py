@@ -105,6 +105,31 @@ def _ascii_key(value: str) -> str:
 
 
 def _glp_v2_repeated_floor_multiplier(text: str) -> int | None:
+    title_ranges = [
+        abs(int(end) - int(start)) + 1
+        for start, end in re.findall(
+            (
+                r"planta\s+baixa\s+pavimento\s+tipo\s*"
+                r"\(\s*(\d+)\s*(?:º|o)?\s*(?:ao|a)\s*(\d+)\s*(?:º|o)?\s*\)"
+            ),
+            text,
+            flags=re.IGNORECASE,
+        )
+    ]
+    if title_ranges:
+        return min(title_ranges)
+
+    ranges = [
+        abs(int(end) - int(start)) + 1
+        for start, end in re.findall(
+            r"\b(\d+)\s*(?:º|o)?\s*(?:ao|a)\s*(\d+)\s*(?:º|o)?\s*pav",
+            text,
+            flags=re.IGNORECASE,
+        )
+    ]
+    if ranges:
+        return min(ranges)
+
     match = re.search(
         r"\(\s*(\d+)\s*PAV\s+X\s+\d+\s*APTOS?\s*\[\s*02\s*PONTOS\s*\]\s*=\s*\d+\s*PONTOS\s*\)",
         text,
@@ -123,15 +148,28 @@ def _glp_v2_is_upper_floor_source(filename: str, text: str) -> bool:
 
 
 def _glp_v2_source_kind(filename: str, text: str) -> str:
-    key = _ascii_key(f"{filename} {text[:700]}")
-    if any(marker in key for marker in ("corte", "esquematico", "diagrama")):
+    filename_key = _ascii_key(filename)
+    text_key = _ascii_key(text[:700])
+    key = f"{filename_key} {text_key}"
+    floor_plan_markers = ("terreo", "pavimento", "pav.", "_tipo", " tipo")
+    if any(marker in filename_key for marker in ("corte", "esquematico", "diagrama")):
         return "schematic_reference"
-    if any(marker in key for marker in ("detalhe", "legenda")):
+    if re.search(r"\bcor(?:te)?\s+esquematico\b", text_key) and not any(
+        marker in filename_key for marker in floor_plan_markers
+    ):
+        return "schematic_reference"
+    if any(marker in filename_key for marker in ("detalhe", "legenda")):
         return "detail"
+    if any(marker in filename_key for marker in floor_plan_markers):
+        return "floor_plan"
     if "abrigo" in key or "p190" in key or "p-190" in key:
         return "shelter_plan"
     if "quadro" in key and any(marker in key for marker in ("quantitativo", "medicao")):
         return "repeated_floor_schedule"
+    if "planta baixa" in text_key and any(marker in text_key for marker in floor_plan_markers):
+        return "floor_plan"
+    if any(marker in text_key for marker in ("detalhe", "legenda")):
+        return "detail"
     if _glp_v2_is_upper_floor_source(filename, text) or "terreo" in key:
         return "floor_plan"
     return "visual_label"
@@ -201,7 +239,7 @@ def extract_glp_v2_quantitative_candidates(extraction_result: Any) -> list[Quant
                     )
                 )
 
-        if multiplier is None and not is_upper_floor and is_installed_source:
+        if multiplier is None and not is_upper_floor and source_kind == "repeated_floor_schedule":
             continue
 
         for entity in ("fogao", "churrasqueira"):
