@@ -37,6 +37,7 @@ from app.services.pipeline_from_files import (
 from app.services.project_extractor import ExtractedSourceFile, ProjectExtractionResult
 from app.services.quantitative_extraction import (
     QuantitativeCandidate,
+    extract_glp_v2_quantitative_candidates,
     resolve_glp_v2_quantitatives,
 )
 
@@ -1430,6 +1431,146 @@ class FillGapsTests(unittest.TestCase):
 
 class GlpV2AssemblyTests(unittest.TestCase):
     """MAKAI-style regression shape: 1 tank, 29 apts, 35+35 points, 1 1/4\" pipe (no project name hardcoding)."""
+
+    def test_quantitative_candidates_mark_schematic_point_labels_as_reference_only(self) -> None:
+        extraction_result = ProjectExtractionResult(
+            raw_text="",
+            source_files=[
+                ExtractedSourceFile(
+                    original_filename="05_corte_esquematico.pdf",
+                    stored_filename="05_corte_esquematico.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/05_corte_esquematico.pdf",
+                    extracted_text="APTO 801 FOGÕES\nFogão 7.000 Kcal/h Churrasqueira 7.000 Kcal/h",
+                )
+            ],
+            signals={"total_files": 1},
+        )
+
+        candidates = extract_glp_v2_quantitative_candidates(extraction_result)
+
+        self.assertTrue(candidates)
+        self.assertTrue(all(candidate.is_reference_only for candidate in candidates))
+        self.assertTrue(
+            all(candidate.source_kind == "schematic_reference" for candidate in candidates)
+        )
+
+    def test_quantitative_resolver_does_not_select_reference_only_schematic_points(self) -> None:
+        merged = {
+            "obra": {"qtd_apartamentos": 29},
+            "tanques": {"quantidade": 1},
+            "dimensionamento": {
+                "qtd_fogao": 0,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 0,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {"fogao": 0, "churrasqueira": 0},
+        }
+        schematic_candidate = QuantitativeCandidate(
+            field_path="pontos_utilizacao.fogao",
+            value=801,
+            unit="un",
+            entity="fogao",
+            memorial_type="glp_v2",
+            source_file="05_corte_esquematico.pdf",
+            page_number=None,
+            source_kind="schematic_reference",
+            extraction_method="glp_v2_appliance_labels_with_floor_scope",
+            evidence_text="APTO 801 FOGÕES",
+            confidence="low",
+            is_reference_only=True,
+            is_installed_quantity=False,
+        )
+
+        result = resolve_glp_v2_quantitatives(
+            merged,
+            [],
+            extra_candidates=[schematic_candidate],
+        )
+
+        self.assertEqual(result.dimensionamento["qtd_fogao"], 0)
+        self.assertEqual(result.pontos_utilizacao["fogao"], 0)
+
+    def test_quantitative_resolver_flags_visual_apartment_ids_as_unresolved(self) -> None:
+        merged = {
+            "obra": {"qtd_apartamentos": {"valor": 30, "confianca": "high"}},
+            "tanques": {"quantidade": 1},
+            "dimensionamento": {
+                "qtd_fogao": 35,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 35,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {"fogao": 35, "churrasqueira": 35},
+        }
+        weak_apartment_candidate = QuantitativeCandidate(
+            field_path="obra.qtd_apartamentos.valor",
+            value=30,
+            unit="un",
+            entity="apartamentos",
+            memorial_type="glp_v2",
+            source_file=None,
+            page_number=None,
+            source_kind="visual_label",
+            extraction_method="unique_apartment_ids",
+            evidence_text="30 unidades únicas identificadas por AP/APTO",
+            confidence="low",
+            is_reference_only=True,
+            is_installed_quantity=False,
+        )
+
+        result = resolve_glp_v2_quantitatives(
+            merged,
+            [],
+            extra_candidates=[weak_apartment_candidate],
+        )
+
+        self.assertTrue(
+            any(
+                conflict.get("field_path") == "obra.qtd_apartamentos.valor"
+                and conflict.get("status") == "unresolved"
+                for conflict in result.conflicts
+            )
+        )
+        self.assertEqual(result.obra["qtd_apartamentos"], 0)
+
+    def test_assemble_uses_shelter_count_for_rendered_tank_quantity(self) -> None:
+        merged = {
+            "obra": {
+                "numero_cadastro": "X",
+                "construtora": "C",
+                "nome": "N",
+                "localizacao": "L",
+                "tipo_edificacao": "residencial",
+                "tipologia": "torre",
+                "qtd_apartamentos": 29,
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 2, "qtd_abrigos": 1, "qtd_recipientes": 2, "tipo": "P-190"},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 35,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 35,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {"fogao": 35, "churrasqueira": 35},
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_material": "aço carbono",
+                "primario_pavimento": "térreo",
+            },
+            "numero": {"prancha": "01/04"},
+            "teto_ou_piso": "piso",
+        }
+
+        out = _assemble_glp_v2_payload(merged, [])
+
+        self.assertEqual(out["tanques"]["quantidade"], 1)
+        self.assertEqual(out["tanques"]["qtd_abrigos"], 1)
+        self.assertEqual(out["tanques"]["qtd_recipientes"], 2)
 
     def test_quantitative_resolver_prefers_authoritative_point_candidates(self) -> None:
         merged = {

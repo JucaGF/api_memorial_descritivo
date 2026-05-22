@@ -117,6 +117,7 @@ def build_valid_glp_v2_context() -> dict:
             "tipo": "P-190",
             "capacidade_kg": 190,
             "qtd_abrigos": 1,
+            "qtd_recipientes": 2,
             "fonte_evidencia": [
                 {
                     "texto": "Abrigo de gas P-190",
@@ -284,7 +285,8 @@ class MemorialRendererTests(unittest.TestCase):
         )
 
         self.assertIn("{{ obra.qtd_apartamentos.valor }}", template_text)
-        self.assertIn("{{ tanques.quantidade }}", template_text)
+        self.assertIn("{{ tanques.qtd_abrigos }}", template_text)
+        self.assertNotIn("{{ tanques.quantidade }}", template_text)
         self.assertIn("{{ pontos_utilizacao.fogao }}", template_text)
         self.assertIn("{{ pontos_utilizacao.total_calculado }}", template_text)
         self.assertIn("{{ diametros.tubulacao_principal.valor_formatado }}", template_text)

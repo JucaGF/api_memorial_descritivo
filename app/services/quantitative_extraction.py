@@ -119,12 +119,27 @@ def _glp_v2_is_upper_floor_source(filename: str, text: str) -> bool:
     key = _ascii_key(f"{filename} {text[:500]}")
     if any(marker in key for marker in ("terreo", "subsolo", "corte", "detalhe", "legenda")):
         return False
-    return "pavimento" in key and bool(re.search(r"\b\d+\s*(?:o|e|ao)\b", key))
+    return "pavimento" in key and bool(re.search(r"\d", key))
+
+
+def _glp_v2_source_kind(filename: str, text: str) -> str:
+    key = _ascii_key(f"{filename} {text[:700]}")
+    if any(marker in key for marker in ("corte", "esquematico", "diagrama")):
+        return "schematic_reference"
+    if any(marker in key for marker in ("detalhe", "legenda")):
+        return "detail"
+    if "abrigo" in key or "p190" in key or "p-190" in key:
+        return "shelter_plan"
+    if "quadro" in key and any(marker in key for marker in ("quantitativo", "medicao")):
+        return "repeated_floor_schedule"
+    if _glp_v2_is_upper_floor_source(filename, text) or "terreo" in key:
+        return "floor_plan"
+    return "visual_label"
 
 
 def _glp_v2_appliance_label_count(text: str, appliance: str) -> int:
     if appliance == "fogao":
-        pattern = r"\bfog(?:ão|oes|ões)\s+7[,.]000\b"
+        pattern = r"\bfog(?:.{0,2}o|oes|.{0,2}es)\s+7[,.]000\b"
     else:
         pattern = r"\bchurrasqueiras?\s+7[,.]000\b"
     return len(re.findall(pattern, text, flags=re.IGNORECASE))
@@ -143,6 +158,7 @@ def extract_glp_v2_quantitative_candidates(extraction_result: Any) -> list[Quant
         "fogao": [],
         "churrasqueira": [],
     }
+    candidates: list[QuantitativeCandidate] = []
 
     for source_file in source_files:
         text = str(getattr(source_file, "extracted_text", "") or "")
@@ -150,24 +166,44 @@ def extract_glp_v2_quantitative_candidates(extraction_result: Any) -> list[Quant
         if not text:
             continue
 
+        source_kind = _glp_v2_source_kind(filename, text)
         multiplier = _glp_v2_repeated_floor_multiplier(text)
         is_upper_floor = _glp_v2_is_upper_floor_source(filename, text)
-        if multiplier is None and not is_upper_floor:
+        is_installed_source = source_kind in {"floor_plan", "repeated_floor_schedule"}
+        if multiplier is None and not is_upper_floor and is_installed_source:
             continue
 
         for entity in ("fogao", "churrasqueira"):
             count = _glp_v2_appliance_label_count(text, entity)
             if count <= 0:
                 continue
-            contribution = count * multiplier if multiplier is not None else count
+            contribution = count * multiplier if multiplier is not None and is_installed_source else count
             scope = (
                 f"{count} rotulos x {multiplier} pavimentos"
-                if multiplier is not None
+                if multiplier is not None and is_installed_source
                 else f"{count} rotulos em pavimento identificado"
             )
-            contributions[entity].append((contribution, scope, filename or None))
+            if is_installed_source:
+                contributions[entity].append((contribution, scope, filename or None))
+            else:
+                candidates.append(
+                    QuantitativeCandidate(
+                        field_path=f"pontos_utilizacao.{entity}",
+                        value=contribution,
+                        unit="un",
+                        entity=entity,
+                        memorial_type="glp_v2",
+                        source_file=filename or None,
+                        page_number=None,
+                        source_kind=source_kind,
+                        extraction_method="glp_v2_appliance_labels_with_floor_scope",
+                        evidence_text=scope,
+                        confidence="low",
+                        is_reference_only=True,
+                        is_installed_quantity=False,
+                    )
+                )
 
-    candidates: list[QuantitativeCandidate] = []
     for entity, field_path in (
         ("fogao", "pontos_utilizacao.fogao"),
         ("churrasqueira", "pontos_utilizacao.churrasqueira"),
@@ -198,10 +234,12 @@ def extract_glp_v2_quantitative_candidates(extraction_result: Any) -> list[Quant
             )
         )
 
-    if {"fogao", "churrasqueira"} <= {
-        candidate.entity for candidate in candidates
-    }:
-        total = sum(int(candidate.value) for candidate in candidates)
+    if contributions["fogao"] and contributions["churrasqueira"]:
+        total = sum(
+            int(candidate.value) for candidate in candidates
+            if candidate.entity in {"fogao", "churrasqueira"}
+            and not candidate.is_reference_only
+        )
         candidates.append(
             QuantitativeCandidate(
                 field_path="pontos_utilizacao.total_calculado",
@@ -295,9 +333,54 @@ def _resolve_scalar_quantity(
     extraction_method: str,
     candidates: list[QuantitativeCandidate],
     resolutions: list[dict[str, Any]],
+    conflicts: list[dict[str, Any]],
     default: int = 0,
 ) -> int:
     value = raw_value.get("valor") if isinstance(raw_value, dict) else raw_value
+    related_candidates = [
+        candidate for candidate in candidates
+        if candidate.field_path == field_path or candidate.entity == entity
+    ]
+    if related_candidates:
+        selected_candidate = _select_authoritative_int_candidate(
+            candidates,
+            field_paths={field_path},
+            entity=entity,
+        )
+        if selected_candidate is None:
+            conflicts.append(
+                {
+                    "tipo": "glp_v2_scalar_quantity_unresolved",
+                    "status": "unresolved",
+                    "field_path": field_path,
+                    "fontes": sorted({candidate.source_kind for candidate in related_candidates}),
+                    "mensagem": "Quantidade critica sem candidato autoritativo instalado.",
+                }
+            )
+            resolutions.append(
+                _resolution_report(
+                    field_path=field_path,
+                    status="unresolved",
+                    selected_value=None,
+                    rule="glp_v2_scalar_quantity_requires_authoritative_candidate",
+                    message="Valor bruto foi rejeitado porque as evidencias disponiveis sao referenciais ou fracas.",
+                    candidates=related_candidates,
+                )
+            )
+            return default
+        selected = int(selected_candidate.value)
+        resolutions.append(
+            _resolution_report(
+                field_path=field_path,
+                status="resolved",
+                selected_value=selected,
+                rule="glp_v2_authoritative_scalar_quantity_candidate",
+                message="Valor quantitativo selecionado a partir de candidato autoritativo.",
+                candidates=[selected_candidate],
+            )
+        )
+        return selected
+
     selected = _as_int(value, default)
     candidate = _candidate(
         field_path=field_path,
@@ -514,20 +597,23 @@ def resolve_glp_v2_quantitatives(
         extraction_method="llm_or_mapper",
         candidates=candidates,
         resolutions=resolutions,
+        conflicts=conflicts,
         default=0,
     )
     qtd_tanques = _resolve_scalar_quantity(
         field_path="tanques.quantidade",
-        raw_value=tanques.get("quantidade"),
+        raw_value=tanques.get("qtd_abrigos", tanques.get("quantidade")),
         entity="tanques_glp_instalados",
         source_kind="shelter_or_tank_drawing",
         extraction_method="llm_or_mapper",
         candidates=candidates,
         resolutions=resolutions,
+        conflicts=conflicts,
         default=0,
     )
     obra["qtd_apartamentos"] = qtd_apartamentos
     tanques["quantidade"] = qtd_tanques
+    tanques["qtd_abrigos"] = qtd_tanques
 
     for mapper_conflict in mapper_critical:
         if (
