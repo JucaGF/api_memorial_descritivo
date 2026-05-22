@@ -1335,6 +1335,8 @@ def _glp_v2_main_pipe_windows(raw_text: str) -> list[str]:
     for pattern in (
         r"ramal(?:\s+interno)?(?:\s+prim[aá]rio)?",
         r"tubula[cç][ãa]o\s+principal",
+        r"tubula[cç][ãa]o\s+em\s+a[cç]o\s+carbono",
+        r"tubula[cç][ãa]o[^\n]{0,90}\bsubsolo\b",
     ):
         for match in re.finditer(pattern, raw_text, flags=re.IGNORECASE):
             window = raw_text[match.start() : match.start() + 220]

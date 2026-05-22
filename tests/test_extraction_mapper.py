@@ -580,6 +580,16 @@ class GlpV2MapperTests(unittest.TestCase):
         self.assertIsInstance(diam, dict)
         self.assertEqual(diam["unidade"], "in")
 
+    def test_map_treats_subsolo_carbon_steel_pipe_as_main_diameter(self) -> None:
+        raw = """
+        Tubulação em Aço Carbono SCH 40 no teto do Subsolo ⌀1 1/4"
+        """
+        result = map_extraction_to_partial_glp_v2_context(build_extraction_result(raw))
+        diam = result.context.get("diametros", {}).get("tubulacao_principal")
+
+        self.assertIsInstance(diam, dict)
+        self.assertEqual(diam["valor_formatado"], '1 1/4"')
+
     def test_critical_conflict_when_fogao_equals_apartments_regex(self) -> None:
         raw = """
         Empreendimento com 29 apartamentos.

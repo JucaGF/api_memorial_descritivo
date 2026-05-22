@@ -113,6 +113,21 @@ def _apply_glp_authoritative_mapper_overrides(
     return overridden
 
 
+def _apply_glp_v2_mapper_overrides(
+    context: dict[str, Any],
+    mapper_context: dict[str, Any],
+) -> dict[str, Any]:
+    obra = mapper_context.get("obra")
+    if not isinstance(obra, dict):
+        return context
+
+    tipologia = obra.get("tipologia")
+    if not isinstance(tipologia, str) or not tipologia.strip():
+        return context
+
+    return merge_context(context, {"obra": {"tipologia": tipologia.strip()}})
+
+
 def _normalize_glp_pavimento(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -1140,6 +1155,7 @@ def extract_glp_v2_mapping_from_ingested_files(
 
     gap_fills = _fill_gaps(llm_context, mapper_ctx)
     merged = merge_context(llm_context, gap_fills) if gap_fills else llm_context
+    merged = _apply_glp_v2_mapper_overrides(merged, mapper_ctx)
 
     merged = _normalize_glp_non_total_fields(merged)
 

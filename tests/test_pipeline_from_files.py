@@ -1448,12 +1448,52 @@ class GlpV2AssemblyTests(unittest.TestCase):
         )
 
         candidates = extract_glp_v2_quantitative_candidates(extraction_result)
+        point_candidates = [
+            candidate for candidate in candidates
+            if candidate.field_path.startswith("pontos_utilizacao.")
+        ]
 
-        self.assertTrue(candidates)
-        self.assertTrue(all(candidate.is_reference_only for candidate in candidates))
+        self.assertTrue(point_candidates)
+        self.assertTrue(all(candidate.is_reference_only for candidate in point_candidates))
         self.assertTrue(
-            all(candidate.source_kind == "schematic_reference" for candidate in candidates)
+            all(candidate.source_kind == "schematic_reference" for candidate in point_candidates)
         )
+
+    def test_quantitative_candidates_count_apartments_from_schematic_cut(self) -> None:
+        extraction_result = ProjectExtractionResult(
+            raw_text="",
+            source_files=[
+                ExtractedSourceFile(
+                    original_filename="05_corte_esquematico.pdf",
+                    stored_filename="05_corte_esquematico.pdf",
+                    extension=".pdf",
+                    saved_path="/tmp/05_corte_esquematico.pdf",
+                    extracted_text="""
+                    CORTE ESQUEMÁTICO
+                    APTO 801
+                    APTO 704 APTO 703 APTO 702 APTO 701
+                    APTO 604 APTO 603 APTO 602 APTO 601
+                    APTO 504 APTO 503 APTO 502 APTO 501
+                    APTO 404 APTO 403 APTO 402 APTO 401
+                    APTO 304 APTO 303 APTO 302 APTO 301
+                    APTO 204 APTO 203 APTO 202 APTO 201
+                    APTO 104 APTO 103 APTO 102 APTO 101
+                    APTO 001
+                    """,
+                )
+            ],
+            signals={"total_files": 1},
+        )
+
+        candidates = extract_glp_v2_quantitative_candidates(extraction_result)
+        apartment = next(
+            candidate for candidate in candidates
+            if candidate.field_path == "obra.qtd_apartamentos.valor"
+        )
+
+        self.assertEqual(apartment.value, 29)
+        self.assertEqual(apartment.source_kind, "schematic_apartment_schedule")
+        self.assertFalse(apartment.is_reference_only)
 
     def test_quantitative_resolver_does_not_select_reference_only_schematic_points(self) -> None:
         merged = {
@@ -1491,6 +1531,42 @@ class GlpV2AssemblyTests(unittest.TestCase):
 
         self.assertEqual(result.dimensionamento["qtd_fogao"], 0)
         self.assertEqual(result.pontos_utilizacao["fogao"], 0)
+
+    def test_quantitative_resolver_prefers_schematic_apartment_count_over_llm_value(self) -> None:
+        merged = {
+            "obra": {"qtd_apartamentos": {"valor": 30, "confianca": "high"}},
+            "tanques": {"quantidade": 1},
+            "dimensionamento": {
+                "qtd_fogao": 35,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 35,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {"fogao": 35, "churrasqueira": 35},
+        }
+        schematic_apartment_candidate = QuantitativeCandidate(
+            field_path="obra.qtd_apartamentos.valor",
+            value=29,
+            unit="un",
+            entity="apartamentos",
+            memorial_type="glp_v2",
+            source_file="05_corte_esquematico.pdf",
+            page_number=None,
+            source_kind="schematic_apartment_schedule",
+            extraction_method="glp_v2_schematic_apartment_ids",
+            evidence_text="APTO 101 a APTO 801",
+            confidence="high",
+            is_reference_only=False,
+            is_installed_quantity=True,
+        )
+
+        result = resolve_glp_v2_quantitatives(
+            merged,
+            [],
+            extra_candidates=[schematic_apartment_candidate],
+        )
+
+        self.assertEqual(result.obra["qtd_apartamentos"], 29)
 
     def test_quantitative_resolver_flags_visual_apartment_ids_as_unresolved(self) -> None:
         merged = {
@@ -1906,6 +1982,64 @@ class GlpV2AssemblyTests(unittest.TestCase):
             if item["rule"] == "glp_v2_authoritative_individual_points"
         )
         self.assertEqual(point_resolution["selected_value"], 70)
+
+    @patch("app.services.pipeline_from_files.is_llm_extraction_enabled", return_value=True)
+    @patch("app.services.pipeline_from_files.map_extraction_to_partial_glp_v2_context")
+    @patch("app.services.pipeline_from_files.extract_glp_v2_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_glp_v2_prefers_concise_mapper_typology_over_verbose_llm_text(
+        self,
+        extract_project_mock,
+        llm_mock,
+        mapper_mock,
+        _enabled_mock,
+    ) -> None:
+        llm_context = {
+            "obra": {
+                "numero_cadastro": "X",
+                "construtora": "C",
+                "nome": "N",
+                "localizacao": "L",
+                "tipo_edificacao": "residencial",
+                "tipologia": (
+                    "07 pavimentos x 04 aptos, com 02 pontos por apartamento; "
+                    "corte esquemático indica também aptos 001 e 801"
+                ),
+                "qtd_apartamentos": 29,
+                "qtd_lojas": 0,
+                "qtd_restaurantes": 0,
+            },
+            "tanques": {"quantidade": 1},
+            "abastecimento": {"pavimento": "térreo"},
+            "dimensionamento": {
+                "qtd_fogao": 35,
+                "qtd_aquecedor": 0,
+                "qtd_churrasqueira": 35,
+                "qtd_outros": 0,
+            },
+            "pontos_utilizacao": {"total_extraido": 70},
+            "ramal": {
+                "primario_diametro": '1 1/4"',
+                "primario_material": "aço carbono",
+                "primario_pavimento": "térreo",
+            },
+            "numero": {"prancha": "01/04"},
+            "teto_ou_piso": "piso",
+        }
+        mapper_mapping = MappingResult(
+            context={"obra": {"tipologia": "Subsolo, térreo, 8 pavimentos"}},
+            evidence={},
+        )
+        extract_project_mock.return_value = build_glp_v2_quantitative_extraction_result()
+        llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
+        mapper_mock.return_value = mapper_mapping
+
+        mapping, _ = extract_glp_v2_mapping_from_ingested_files([build_ingested_file()])
+
+        self.assertEqual(
+            mapping.context["obra"]["tipologia"],
+            "Subsolo, térreo, 8 pavimentos",
+        )
 
 
 if __name__ == "__main__":

@@ -145,6 +145,14 @@ def _glp_v2_appliance_label_count(text: str, appliance: str) -> int:
     return len(re.findall(pattern, text, flags=re.IGNORECASE))
 
 
+def _glp_v2_schematic_apartment_ids(text: str) -> set[int]:
+    ids = {
+        int(match)
+        for match in re.findall(r"\bAPTO\s*0?(\d{3})\b", text, flags=re.IGNORECASE)
+    }
+    return {apt for apt in ids if apt // 100 >= 1}
+
+
 def extract_glp_v2_quantitative_candidates(extraction_result: Any) -> list[QuantitativeCandidate]:
     """Extract deterministic GLP v2 quantitative candidates from project text.
 
@@ -170,6 +178,29 @@ def extract_glp_v2_quantitative_candidates(extraction_result: Any) -> list[Quant
         multiplier = _glp_v2_repeated_floor_multiplier(text)
         is_upper_floor = _glp_v2_is_upper_floor_source(filename, text)
         is_installed_source = source_kind in {"floor_plan", "repeated_floor_schedule"}
+
+        if source_kind == "schematic_reference":
+            apartment_ids = _glp_v2_schematic_apartment_ids(text)
+            if apartment_ids:
+                candidates.append(
+                    QuantitativeCandidate(
+                        field_path="obra.qtd_apartamentos.valor",
+                        value=len(apartment_ids),
+                        unit="un",
+                        entity="apartamentos",
+                        memorial_type="glp_v2",
+                        source_file=filename or None,
+                        page_number=None,
+                        source_kind="schematic_apartment_schedule",
+                        extraction_method="glp_v2_schematic_apartment_ids",
+                        evidence_text=(
+                            f"{len(apartment_ids)} apartamentos identificados no corte "
+                            f"(APTO {min(apartment_ids):03d} a APTO {max(apartment_ids):03d})"
+                        ),
+                        confidence="high",
+                    )
+                )
+
         if multiplier is None and not is_upper_floor and is_installed_source:
             continue
 
@@ -432,6 +463,7 @@ _AUTHORITATIVE_SOURCE_PRIORITY = {
     "installed_quantity_table": 100,
     "deterministic_installed_quantity": 95,
     "visual_installed_labels": 90,
+    "schematic_apartment_schedule": 90,
     "schematic_installed_labels": 80,
     "unit_schedule": 75,
 }
