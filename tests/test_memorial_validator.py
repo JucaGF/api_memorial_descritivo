@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
+from app.services.context_builder import build_memorial_eletrico_v1_context
 from app.services.memorial_validator import (
     MemorialValidationError,
     load_eletrico_v1_schema,
@@ -172,7 +173,7 @@ class MemorialValidatorTests(unittest.TestCase):
                 "qtd_lojas": 0,
                 "qtd_restaurantes": 0,
             },
-            "tanques": {"quantidade": 1},
+            "tanques": {"quantidade": 1, "qtd_abrigos": 1},
             "abastecimento": {"pavimento": "térreo"},
             "dimensionamento": {
                 "qtd_fogao": 1,
@@ -225,7 +226,7 @@ class MemorialValidatorTests(unittest.TestCase):
                 "qtd_lojas": 0,
                 "qtd_restaurantes": 0,
             },
-            "tanques": {"quantidade": 1},
+            "tanques": {"quantidade": 1, "qtd_abrigos": 1},
             "abastecimento": {"pavimento": "térreo"},
             "dimensionamento": {
                 "qtd_fogao": 35,
@@ -326,6 +327,15 @@ class MemorialValidatorTests(unittest.TestCase):
         context["gerador"]["tipo_atendimento"] = None
         context["gerador"]["circuitos_atendidos"] = None
         validate_memorial_eletrico_v1_context(context)
+
+    def test_eletrico_context_builder_creates_empty_mt_section_when_missing(self) -> None:
+        context = load_fixture()
+        context.pop("mt")
+
+        built = build_memorial_eletrico_v1_context(context)
+
+        self.assertEqual(built["mt"], {})
+        validate_memorial_eletrico_v1_context(built)
 
 
 if __name__ == "__main__":

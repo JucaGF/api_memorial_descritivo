@@ -446,7 +446,7 @@ def _extract_qtd_apartamentos(text: str) -> FieldExtraction | None:
             value=len(apartment_ids),
             evidence=f"{len(apartment_ids)} unidades únicas identificadas por AP/APTO",
             rule="unique_apartment_ids",
-            confidence="high",
+            confidence="low",
         )
 
     for pattern in (
@@ -627,7 +627,7 @@ def _extract_glp_quantity_from_patterns(
 
 
 def _extract_glp_qtd_fogao(text: str) -> FieldExtraction | None:
-    return _extract_glp_quantity_from_patterns(
+    extraction = _extract_glp_quantity_from_patterns(
         text=text,
         patterns=(
             r"(?<![\d.,])(\d+)\s*fog(?:[ãa]o|[õo]es?)\b",
@@ -635,6 +635,12 @@ def _extract_glp_qtd_fogao(text: str) -> FieldExtraction | None:
         ),
         rule="glp_fogao_count_regex",
     )
+    if extraction is None:
+        return None
+    value = extraction.value
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 100:
+        return None
+    return extraction
 
 
 def _extract_glp_qtd_aquecedor(text: str) -> FieldExtraction | None:
@@ -1331,7 +1337,10 @@ def _glp_v2_main_pipe_windows(raw_text: str) -> list[str]:
         r"tubula[cç][ãa]o\s+principal",
     ):
         for match in re.finditer(pattern, raw_text, flags=re.IGNORECASE):
-            windows.append(raw_text[match.start() : match.start() + 220])
+            window = raw_text[match.start() : match.start() + 220]
+            if re.search(r"ramal\s+secund", window[:80], flags=re.IGNORECASE):
+                continue
+            windows.append(window)
     return windows
 
 

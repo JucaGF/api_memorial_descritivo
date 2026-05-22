@@ -1037,8 +1037,12 @@ def _assemble_glp_v2_payload(
         tanques["tipo"] = tanques_in["tipo"]
     if tanques_in.get("capacidade_kg") is not None:
         tanques["capacidade_kg"] = float(tanques_in["capacidade_kg"])
-    if tanques_in.get("qtd_abrigos") is not None:
+    if quantitative_result.tanques.get("qtd_abrigos") is not None:
+        tanques["qtd_abrigos"] = int(quantitative_result.tanques["qtd_abrigos"])
+    elif tanques_in.get("qtd_abrigos") is not None:
         tanques["qtd_abrigos"] = int(tanques_in["qtd_abrigos"])
+    if tanques_in.get("qtd_recipientes") is not None:
+        tanques["qtd_recipientes"] = int(tanques_in["qtd_recipientes"])
 
     ab_raw = work.get("abastecimento") or {}
     if not isinstance(ab_raw, dict):

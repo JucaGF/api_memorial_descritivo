@@ -68,16 +68,25 @@
     "tanques": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["quantidade"],
-      "description": "Quantidade de RECIPIENTES (cilindros/tanques) GLP instalados, distinto de quantidade de abrigos. Detalhes de legendas, cortes e tabelas de referência não contam.",
+      "required": ["quantidade", "qtd_abrigos"],
+      "description": "Quantidade de abrigos/conjuntos GLP instalados para renderizacao, mantendo recipientes P-190 separados quando houver evidencia confiavel. Detalhes de legendas, cortes e tabelas de referencia nao contam como quantidade instalada.",
       "properties": {
-        "quantidade": {"type": "integer", "minimum": 0},
+        "quantidade": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Alias legado de qtd_abrigos para compatibilidade; nao representa a quantidade de recipientes P-190."
+        },
         "tipo": {"type": "string", "description": "Ex: 'P-190'."},
         "capacidade_kg": {"type": "number", "minimum": 0},
         "qtd_abrigos": {
           "type": "integer",
           "minimum": 0,
           "description": "Quantidade de abrigos que contêm os recipientes."
+        },
+        "qtd_recipientes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Quantidade de cilindros/recipientes P-190 dentro dos abrigos, quando extraida de fonte confiavel."
         },
         "fonte_evidencia": {"$ref": "#/$defs/evidence_list"},
         "conflitos": {"$ref": "#/$defs/conflict_list"}

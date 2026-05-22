@@ -20,7 +20,7 @@ GLP v2 separa conceitos e adiciona rastreabilidade:
 
 | v1 | v2 |
 |---|---|
-| `abastecimento.qtd_tanques` (int, semântica = abrigos) | `tanques.{quantidade, qtd_abrigos, tipo, capacidade_kg, fonte_evidencia, conflitos}` — distingue recipientes (P-190) de abrigos. |
+| `abastecimento.qtd_tanques` (int, semantica = abrigos) | `tanques.{quantidade, qtd_abrigos, qtd_recipientes, tipo, capacidade_kg, fonte_evidencia, conflitos}` - `quantidade` eh alias legado de `qtd_abrigos`; recipientes P-190 ficam em `qtd_recipientes`. |
 | `ramal.primario_diametro` (string crua) | `diametros.tubulacao_principal.{valor, unidade, valor_formatado, valor_original, fonte_evidencia}` — diâmetro normalizado por `app/services/diameter_normalizer.py`. |
 | sem campo | `diametros.valvula_esfera.{valor, unidade, valor_formatado, inferido, fonte_evidencia}` — diâmetro da válvula esfera, com flag `inferido` quando deriva da tubulação por falta de evidência explícita. |
 | `dimensionamento` + `soma.qtd_pontos_de_utilizacao` | `pontos_utilizacao.{fogao, churrasqueira, aquecedor, outros, total_extraido, total_calculado, conflitos}` — separa por tipo, mantém ambos os totais e detecta divergência. |
@@ -33,7 +33,7 @@ A unidade do diâmetro é **explícita** (`"in"` ou `"mm"`) e nunca inferida do 
 
 ## Regras de tanques
 
-`tanques.quantidade` conta **recipientes/cilindros** instalados (ex: 2 P-190). `tanques.qtd_abrigos` conta abrigos (geralmente 1). Detalhes em legendas, cortes esquemáticos, tabelas de referência ou desenhos auxiliares **não** entram na contagem.
+`tanques.qtd_abrigos` conta abrigos/conjuntos instalados (geralmente 1) e eh o campo renderizado no memorial. `tanques.quantidade` permanece como alias legado de `qtd_abrigos` para compatibilidade. `tanques.qtd_recipientes` conta recipientes/cilindros internos (ex: 2 P-190) apenas quando houver evidencia confiavel. Detalhes em legendas, cortes esquematicos, tabelas de referencia ou desenhos auxiliares **nao** entram na contagem instalada.
 
 ## Regras de pontos
 
@@ -42,7 +42,7 @@ A unidade do diâmetro é **explícita** (`"in"` ou `"mm"`) e nunca inferida do 
 ## Casos de teste obrigatórios
 
 - Schema aceita contexto válido com todos os campos obrigatórios.
-- Schema rejeita contexto sem `tanques.quantidade`.
+- Schema rejeita contexto sem `tanques.quantidade` e `tanques.qtd_abrigos`.
 - Schema rejeita contexto com `diametros.tubulacao_principal.unidade` fora do enum.
 - Schema rejeita contexto sem `context_version`/`template_version`.
 - Render GLP v2 preserva diâmetros em polegadas via `valor_formatado` e não concatena unidade fixa (`mm` ou `"`).

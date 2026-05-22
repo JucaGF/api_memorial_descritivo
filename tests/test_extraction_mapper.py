@@ -537,6 +537,28 @@ class TemGeradorHeuristicTests(unittest.TestCase):
 
 
 class GlpV2MapperTests(unittest.TestCase):
+    def test_map_does_not_accept_apartment_number_as_fogao_quantity(self) -> None:
+        raw = """
+        APTO 801
+        FOGÕES
+        Ramal secundário 16mm.
+        """
+        result = map_extraction_to_partial_glp_v2_context(build_extraction_result(raw))
+
+        self.assertNotIn("qtd_fogao", result.context.get("dimensionamento", {}))
+        self.assertNotIn("dimensionamento.qtd_fogao", result.evidence)
+
+    def test_unique_apartment_ids_are_low_confidence_visual_labels(self) -> None:
+        raw = """
+        APTO 101 APTO 102 APTO 201 APTO 202
+        APTO 301 APTO 302 APTO 401 APTO 402
+        """
+        result = map_extraction_to_partial_glp_v2_context(build_extraction_result(raw))
+
+        self.assertEqual(result.context["obra"]["qtd_apartamentos"], 8)
+        self.assertEqual(result.evidence["obra.qtd_apartamentos"].rule, "unique_apartment_ids")
+        self.assertEqual(result.evidence["obra.qtd_apartamentos"].confidence, "low")
+
     def test_map_does_not_read_decimal_heights_as_point_quantities(self) -> None:
         raw = """
         Vista frontal ponto gás p/ fogão 0.60 Fogão 0.60 Fogão.
@@ -566,6 +588,17 @@ class GlpV2MapperTests(unittest.TestCase):
         result = map_extraction_to_partial_glp_v2_context(build_extraction_result(raw))
         conflicts = result.context.get("_glp_v2_critical_conflicts", [])
         self.assertTrue(any(c.get("tipo") == "glp_v2_fogao_apartamentos_colision" for c in conflicts))
+
+
+    def test_map_prefers_main_pipe_diameter_over_secondary_branch(self) -> None:
+        raw = """
+        Ramal Secundário 16mm em multicamadas para pontos internos.
+        Ramal primário em aço carbono SCH 40 com tubo 1 1/4" até o abrigo GLP.
+        """
+        result = map_extraction_to_partial_glp_v2_context(build_extraction_result(raw))
+        diam = result.context.get("diametros", {}).get("tubulacao_principal")
+
+        self.assertEqual(diam["valor_formatado"], '1 1/4"')
 
 
 if __name__ == "__main__":
