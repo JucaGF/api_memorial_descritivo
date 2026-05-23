@@ -83,7 +83,8 @@ def build_memorial_eletrico_v1_context(input_payload: dict[str, Any]) -> dict[st
             energia.setdefault(field_name, None)
     context["energia"] = energia
 
-    context["mt"] = _ensure_dict(context, "mt")
+    mt = _ensure_dict(context, "mt")
+    context["mt"] = mt
 
     return context
 

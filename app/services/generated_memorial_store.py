@@ -8,6 +8,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.schemas.generated_memorial import GeneratedMemorialResponse
+from app.services.review_items import build_review_items
 
 _client_instance: Any = None
 logger = logging.getLogger(__name__)
@@ -170,6 +171,10 @@ def _response_from_record(
     if include_context or include_report:
         payload["extraction_report"] = record.get("extraction_report")
         payload["conflicts"] = record.get("conflicts") or []
+    payload["review_items"] = build_review_items(
+        record.get("final_context"),
+        record.get("extraction_report"),
+    )
     return GeneratedMemorialResponse.model_validate(payload)
 
 

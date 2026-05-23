@@ -105,6 +105,31 @@ def _ascii_key(value: str) -> str:
 
 
 def _glp_v2_repeated_floor_multiplier(text: str) -> int | None:
+    title_ranges = [
+        abs(int(end) - int(start)) + 1
+        for start, end in re.findall(
+            (
+                r"planta\s+baixa\s+pavimento\s+tipo\s*"
+                r"\(\s*(\d+)\s*(?:º|o)?\s*(?:ao|a)\s*(\d+)\s*(?:º|o)?\s*\)"
+            ),
+            text,
+            flags=re.IGNORECASE,
+        )
+    ]
+    if title_ranges:
+        return min(title_ranges)
+
+    ranges = [
+        abs(int(end) - int(start)) + 1
+        for start, end in re.findall(
+            r"\b(\d+)\s*(?:º|o)?\s*(?:ao|a)\s*(\d+)\s*(?:º|o)?\s*pav",
+            text,
+            flags=re.IGNORECASE,
+        )
+    ]
+    if ranges:
+        return min(ranges)
+
     match = re.search(
         r"\(\s*(\d+)\s*PAV\s+X\s+\d+\s*APTOS?\s*\[\s*02\s*PONTOS\s*\]\s*=\s*\d+\s*PONTOS\s*\)",
         text,
@@ -123,15 +148,28 @@ def _glp_v2_is_upper_floor_source(filename: str, text: str) -> bool:
 
 
 def _glp_v2_source_kind(filename: str, text: str) -> str:
-    key = _ascii_key(f"{filename} {text[:700]}")
-    if any(marker in key for marker in ("corte", "esquematico", "diagrama")):
+    filename_key = _ascii_key(filename)
+    text_key = _ascii_key(text[:700])
+    key = f"{filename_key} {text_key}"
+    floor_plan_markers = ("terreo", "pavimento", "pav.", "_tipo", " tipo")
+    if any(marker in filename_key for marker in ("corte", "esquematico", "diagrama")):
         return "schematic_reference"
-    if any(marker in key for marker in ("detalhe", "legenda")):
+    if re.search(r"\bcor(?:te)?\s+esquematico\b", text_key) and not any(
+        marker in filename_key for marker in floor_plan_markers
+    ):
+        return "schematic_reference"
+    if any(marker in filename_key for marker in ("detalhe", "legenda")):
         return "detail"
+    if any(marker in filename_key for marker in floor_plan_markers):
+        return "floor_plan"
     if "abrigo" in key or "p190" in key or "p-190" in key:
         return "shelter_plan"
     if "quadro" in key and any(marker in key for marker in ("quantitativo", "medicao")):
         return "repeated_floor_schedule"
+    if "planta baixa" in text_key and any(marker in text_key for marker in floor_plan_markers):
+        return "floor_plan"
+    if any(marker in text_key for marker in ("detalhe", "legenda")):
+        return "detail"
     if _glp_v2_is_upper_floor_source(filename, text) or "terreo" in key:
         return "floor_plan"
     return "visual_label"
@@ -143,6 +181,14 @@ def _glp_v2_appliance_label_count(text: str, appliance: str) -> int:
     else:
         pattern = r"\bchurrasqueiras?\s+7[,.]000\b"
     return len(re.findall(pattern, text, flags=re.IGNORECASE))
+
+
+def _glp_v2_schematic_apartment_ids(text: str) -> set[int]:
+    ids = {
+        int(match)
+        for match in re.findall(r"\bAPTO\s*0?(\d{3})\b", text, flags=re.IGNORECASE)
+    }
+    return {apt for apt in ids if apt // 100 >= 1}
 
 
 def extract_glp_v2_quantitative_candidates(extraction_result: Any) -> list[QuantitativeCandidate]:
@@ -170,7 +216,30 @@ def extract_glp_v2_quantitative_candidates(extraction_result: Any) -> list[Quant
         multiplier = _glp_v2_repeated_floor_multiplier(text)
         is_upper_floor = _glp_v2_is_upper_floor_source(filename, text)
         is_installed_source = source_kind in {"floor_plan", "repeated_floor_schedule"}
-        if multiplier is None and not is_upper_floor and is_installed_source:
+
+        if source_kind == "schematic_reference":
+            apartment_ids = _glp_v2_schematic_apartment_ids(text)
+            if apartment_ids:
+                candidates.append(
+                    QuantitativeCandidate(
+                        field_path="obra.qtd_apartamentos.valor",
+                        value=len(apartment_ids),
+                        unit="un",
+                        entity="apartamentos",
+                        memorial_type="glp_v2",
+                        source_file=filename or None,
+                        page_number=None,
+                        source_kind="schematic_apartment_schedule",
+                        extraction_method="glp_v2_schematic_apartment_ids",
+                        evidence_text=(
+                            f"{len(apartment_ids)} apartamentos identificados no corte "
+                            f"(APTO {min(apartment_ids):03d} a APTO {max(apartment_ids):03d})"
+                        ),
+                        confidence="high",
+                    )
+                )
+
+        if multiplier is None and not is_upper_floor and source_kind == "repeated_floor_schedule":
             continue
 
         for entity in ("fogao", "churrasqueira"):
@@ -432,6 +501,7 @@ _AUTHORITATIVE_SOURCE_PRIORITY = {
     "installed_quantity_table": 100,
     "deterministic_installed_quantity": 95,
     "visual_installed_labels": 90,
+    "schematic_apartment_schedule": 90,
     "schematic_installed_labels": 80,
     "unit_schedule": 75,
 }

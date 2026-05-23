@@ -30,6 +30,7 @@ class BatchFileExtractionResult:
     extraction_type: str
     payload: dict[str, Any]
     error: str | None = None
+    error_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1320,6 +1321,7 @@ def _extract_batch(
                         extraction_type="error",
                         payload={},
                         error=str(exc),
+                        error_type=type(exc).__name__,
                     )
                 )
                 continue
@@ -1486,6 +1488,21 @@ def _build_cross_validation_summary(
     fallback_used: bool,
     batch_results: list[BatchExtractionResult],
 ) -> dict[str, Any]:
+    file_errors_by_type: dict[str, set[str]] = defaultdict(set)
+    for batch in batch_results:
+        for result in batch.per_file_results:
+            if result.extraction_type != "error" or not result.error_type:
+                continue
+            file_errors_by_type[result.error_type].add(result.filename)
+
+    llm_errors = [
+        {
+            "phase": "file_extraction",
+            "error_type": error_type,
+            "files": sorted(files),
+        }
+        for error_type, files in sorted(file_errors_by_type.items())
+    ]
     batch_merge_errors = [
         {
             "batch_index": batch.batch_index,
@@ -1504,6 +1521,7 @@ def _build_cross_validation_summary(
         "fallback_used": fallback_used,
         "batch_merge_fallback_used": bool(batch_merge_errors),
         "batch_merge_errors": batch_merge_errors,
+        "llm_errors": llm_errors,
     }
 
 
@@ -1560,7 +1578,18 @@ def _run_llm_extraction(
     non_empty_batches = [batch for batch in batch_results if batch.merged_payload]
     if not non_empty_batches:
         logger.warning("%s LLM extraction returned no results from any batch", strategy.name)
-        return LLMExtractionRunResult(context={})
+        return LLMExtractionRunResult(
+            context={},
+            cross_validation=_build_cross_validation_summary(
+                batch_size=batch_size,
+                batch_count=len(batches),
+                candidate_count=0,
+                resolved_fields=set(),
+                conflicts=[],
+                fallback_used=True,
+                batch_results=batch_results,
+            ),
+        )
 
     candidate_groups, candidate_count = _build_candidate_groups(non_empty_batches)
     fallback_used = False

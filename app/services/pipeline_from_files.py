@@ -113,6 +113,21 @@ def _apply_glp_authoritative_mapper_overrides(
     return overridden
 
 
+def _apply_glp_v2_mapper_overrides(
+    context: dict[str, Any],
+    mapper_context: dict[str, Any],
+) -> dict[str, Any]:
+    obra = mapper_context.get("obra")
+    if not isinstance(obra, dict):
+        return context
+
+    tipologia = obra.get("tipologia")
+    if not isinstance(tipologia, str) or not tipologia.strip():
+        return context
+
+    return merge_context(context, {"obra": {"tipologia": tipologia.strip()}})
+
+
 def _normalize_glp_pavimento(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -416,6 +431,97 @@ def _quantitative_candidate_from_evidence(
     )
 
 
+def _ascii_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    return "".join(char for char in normalized if not unicodedata.combining(char)).lower()
+
+
+def _is_schematic_apartment_source(source_file: Any) -> bool:
+    filename = str(getattr(source_file, "original_filename", "") or "")
+    text = str(getattr(source_file, "extracted_text", "") or "")
+    filename_key = _ascii_text(filename)
+    text_key = _ascii_text(text[:1200])
+    if any(marker in filename_key for marker in ("corte", "esquematico", "diagrama")):
+        return True
+    return bool(re.search(r"\bcor(?:te)?\s+esquematico\b", text_key))
+
+
+def _extract_apartment_schedule_ids(extraction_result: Any) -> tuple[set[int], list[str], str]:
+    apartment_ids: set[int] = set()
+    source_names: list[str] = []
+    source_kind = "apartment_schedule"
+    for source_file in list(getattr(extraction_result, "source_files", []) or []):
+        text = str(getattr(source_file, "extracted_text", "") or "")
+        ids = {
+            int(match)
+            for match in re.findall(r"\bAPTO\s*0?(\d{3})\b", text, flags=re.IGNORECASE)
+        }
+        ids = {apt for apt in ids if apt // 100 >= 1}
+        is_schematic = _is_schematic_apartment_source(source_file)
+        if not is_schematic and len(ids) < 8:
+            continue
+        if is_schematic:
+            source_kind = "schematic_apartment_schedule"
+        if not ids:
+            continue
+        apartment_ids.update(ids)
+        filename = str(getattr(source_file, "original_filename", "") or "")
+        if filename:
+            source_names.append(filename)
+    return apartment_ids, source_names, source_kind
+
+
+def _apply_schematic_apartment_count_override(
+    context: dict[str, Any],
+    extraction_result: Any,
+    *,
+    memorial_type: str,
+) -> tuple[dict[str, Any], list[QuantitativeCandidate], list[dict[str, Any]], list[dict[str, Any]]]:
+    apartment_ids, source_names, source_kind = _extract_apartment_schedule_ids(extraction_result)
+    if not apartment_ids:
+        return context, [], [], []
+
+    value = len(apartment_ids)
+    source_file = ", ".join(source_names) if source_names else None
+    evidence_source = "corte" if source_kind == "schematic_apartment_schedule" else "agenda/listagem"
+    evidence_text = (
+        f"{value} apartamentos identificados em {evidence_source} "
+        f"(APTO {min(apartment_ids):03d} a APTO {max(apartment_ids):03d})"
+    )
+    candidate = QuantitativeCandidate(
+        field_path="obra.qtd_apartamentos",
+        value=value,
+        unit="un",
+        entity="apartamentos",
+        memorial_type=memorial_type,
+        source_file=source_file,
+        page_number=None,
+        source_kind=source_kind,
+        extraction_method="apartment_schedule_ids",
+        evidence_text=evidence_text,
+        confidence="high",
+        is_reference_only=False,
+        is_installed_quantity=True,
+    )
+
+    current_value = _get_path(context, "obra.qtd_apartamentos")
+    if current_value == value:
+        return context, [candidate], [], []
+
+    resolved = dict(context)
+    _set_path(resolved, "obra.qtd_apartamentos", value)
+    resolution = {
+        "field_path": "obra.qtd_apartamentos",
+        "status": "resolved",
+        "selected_value": value,
+        "previous_value": current_value,
+        "rule": f"{memorial_type}_apartment_schedule_count",
+        "message": "Quantidade de apartamentos selecionada pela contagem de APTOs em agenda/listagem do projeto.",
+        "candidates": [candidate.to_report()],
+    }
+    return resolved, [candidate], [resolution], []
+
+
 def _is_authoritative_quantitative_evidence(
     *,
     memorial_type: str,
@@ -619,6 +725,16 @@ def _extract_llm_primary(
             memorial_type="eletrico",
         )
     )
+    final_context, ap_candidates, ap_resolutions, ap_conflicts = (
+        _apply_schematic_apartment_count_override(
+            final_context,
+            extraction_result,
+            memorial_type="eletrico",
+        )
+    )
+    candidates.extend(ap_candidates)
+    resolutions.extend(ap_resolutions)
+    conflicts.extend(ap_conflicts)
 
     mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
     report = assess_extraction_coverage(mapping)
@@ -642,6 +758,12 @@ def _extract_mapper_only(
     """Deterministic mapper extraction (fallback when LLM is disabled)."""
     extraction_result = extract_project_files(files)
     mapping = map_extraction_to_partial_context(extraction_result)
+    context, candidates, resolutions, conflicts = _apply_schematic_apartment_count_override(
+        mapping.context,
+        extraction_result,
+        memorial_type="eletrico",
+    )
+    mapping = MappingResult(context=context, evidence=mapping.evidence)
 
     mapper_fields = sum(
         len(s) for s in mapping.context.values() if isinstance(s, dict)
@@ -649,6 +771,12 @@ def _extract_mapper_only(
     logger.info("Mapper extracted %d fields from %d files", mapper_fields, len(files))
 
     report = assess_extraction_coverage(mapping)
+    report = _attach_quantitative_report(
+        report,
+        candidates=candidates,
+        resolutions=resolutions,
+        conflicts=conflicts,
+    )
     logger.info(
         "Extraction coverage: filled=%d, missing=%d, pending=%d",
         len(report.filled), len(report.missing), len(report.pending),
@@ -688,10 +816,23 @@ def extract_telecom_mapping_from_ingested_files(
             final_context = merge_context(llm_context, gap_fills)
         else:
             final_context = llm_context
+        final_context, candidates, resolutions, conflicts = (
+            _apply_schematic_apartment_count_override(
+                final_context,
+                extraction_result,
+                memorial_type="telecom",
+            )
+        )
 
         mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
         report = assess_telecom_extraction_coverage(mapping)
         report = _attach_cross_validation_report(report, llm_result.cross_validation)
+        report = _attach_quantitative_report(
+            report,
+            candidates=candidates,
+            resolutions=resolutions,
+            conflicts=conflicts,
+        )
         logger.info(
             "Telecom extraction coverage: filled=%d, missing=%d, pending=%d",
             len(report.filled), len(report.missing), len(report.pending),
@@ -700,7 +841,19 @@ def extract_telecom_mapping_from_ingested_files(
 
     extraction_result = extract_project_files(files)
     mapping = map_extraction_to_partial_telecom_context(extraction_result)
+    context, candidates, resolutions, conflicts = _apply_schematic_apartment_count_override(
+        mapping.context,
+        extraction_result,
+        memorial_type="telecom",
+    )
+    mapping = MappingResult(context=context, evidence=mapping.evidence)
     report = assess_telecom_extraction_coverage(mapping)
+    report = _attach_quantitative_report(
+        report,
+        candidates=candidates,
+        resolutions=resolutions,
+        conflicts=conflicts,
+    )
     logger.info(
         "Telecom extraction coverage: filled=%d, missing=%d, pending=%d",
         len(report.filled), len(report.missing), len(report.pending),
@@ -739,6 +892,16 @@ def extract_gas_natural_mapping_from_ingested_files(
                 memorial_type="gas_natural",
             )
         )
+        final_context, ap_candidates, ap_resolutions, ap_conflicts = (
+            _apply_schematic_apartment_count_override(
+                final_context,
+                extraction_result,
+                memorial_type="gas_natural",
+            )
+        )
+        candidates.extend(ap_candidates)
+        resolutions.extend(ap_resolutions)
+        conflicts.extend(ap_conflicts)
         final_context = _normalize_gas_natural_context(final_context)
         final_context = _reconcile_gas_natural_quantitative_total(
             final_context,
@@ -764,11 +927,22 @@ def extract_gas_natural_mapping_from_ingested_files(
 
     extraction_result = extract_project_files(files)
     mapping = map_extraction_to_partial_gas_natural_context(extraction_result)
+    context, candidates, resolutions, conflicts = _apply_schematic_apartment_count_override(
+        mapping.context,
+        extraction_result,
+        memorial_type="gas_natural",
+    )
     mapping = MappingResult(
-        context=_normalize_gas_natural_context(mapping.context),
+        context=_normalize_gas_natural_context(context),
         evidence=mapping.evidence,
     )
     report = assess_gas_natural_extraction_coverage(mapping)
+    report = _attach_quantitative_report(
+        report,
+        candidates=candidates,
+        resolutions=resolutions,
+        conflicts=conflicts,
+    )
     logger.info(
         "Gas natural extraction coverage: filled=%d, missing=%d, pending=%d",
         len(report.filled), len(report.missing), len(report.pending),
@@ -918,6 +1092,13 @@ def extract_glp_mapping_from_ingested_files(
         final_context,
         mapper_mapping.context,
     )
+    final_context, candidates, resolutions, quantitative_conflicts = (
+        _apply_schematic_apartment_count_override(
+            final_context,
+            extraction_result,
+            memorial_type="glp",
+        )
+    )
 
     final_context = _normalize_glp_non_total_fields(final_context)
     final_context, conflicts = _reconcile_glp_total_points(final_context)
@@ -926,6 +1107,12 @@ def extract_glp_mapping_from_ingested_files(
     mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
     report = assess_glp_extraction_coverage(mapping)
     report = _attach_cross_validation_report(report, llm_result.cross_validation)
+    report = _attach_quantitative_report(
+        report,
+        candidates=candidates,
+        resolutions=resolutions,
+        conflicts=[*quantitative_conflicts, *conflicts],
+    )
     logger.info(
         "GLP extraction coverage: filled=%d, missing=%d, pending=%d",
         len(report.filled), len(report.missing), len(report.pending),
@@ -1140,6 +1327,7 @@ def extract_glp_v2_mapping_from_ingested_files(
 
     gap_fills = _fill_gaps(llm_context, mapper_ctx)
     merged = merge_context(llm_context, gap_fills) if gap_fills else llm_context
+    merged = _apply_glp_v2_mapper_overrides(merged, mapper_ctx)
 
     merged = _normalize_glp_non_total_fields(merged)
 

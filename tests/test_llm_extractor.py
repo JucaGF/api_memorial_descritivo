@@ -478,6 +478,43 @@ class OpenAIClientResilienceTests(unittest.TestCase):
         self.assertEqual(result.merged_payload, {})
         self.assertEqual(len(result.per_file_results), 3)
         self.assertTrue(all(r.extraction_type == "error" for r in result.per_file_results))
+        self.assertTrue(all(r.error_type == "RuntimeError" for r in result.per_file_results))
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.5")
+    def test_run_result_reports_openai_errors_when_all_batches_fail(
+        self,
+        _model_mock,
+        client_mock,
+    ) -> None:
+        from app.services import llm_extractor
+
+        mock_client = MagicMock()
+        mock_client.responses.parse.side_effect = RuntimeError("OpenAI rate limit")
+        client_mock.return_value = mock_client
+
+        files = [_source_file("a.pdf", "text a"), _source_file("b.pdf", "text b")]
+        with patch.dict(
+            os.environ,
+            {
+                "USE_LLM_EXTRACTION": "true",
+                "LLM_EXTRACTION_MAX_CONCURRENCY": "1",
+            },
+        ):
+            result = llm_extractor.extract_with_llm_result(files)
+
+        self.assertEqual(result.context, {})
+        self.assertIsNotNone(result.cross_validation)
+        self.assertEqual(
+            result.cross_validation["llm_errors"],
+            [
+                {
+                    "phase": "file_extraction",
+                    "error_type": "RuntimeError",
+                    "files": ["a.pdf", "b.pdf"],
+                }
+            ],
+        )
 
 
 class GlpExtractionPromptTests(unittest.TestCase):

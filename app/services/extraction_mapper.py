@@ -441,6 +441,7 @@ def _extract_qtd_apartamentos(text: str) -> FieldExtraction | None:
         int(match)
         for match in re.findall(r"\bAP(?:TO|\.)\s*0?(\d{2,3})\b", text, re.IGNORECASE)
     }
+    apartment_ids = {apartment_id for apartment_id in apartment_ids if apartment_id // 100 >= 1}
     if len(apartment_ids) >= 4:
         return FieldExtraction(
             value=len(apartment_ids),
@@ -1031,6 +1032,43 @@ def _extract_mt_secao_cabo_mm2(text: str) -> FieldExtraction | None:
     return FieldExtraction(value=value, evidence=evidence, rule="mt_secao_cabo_regex", confidence="high")
 
 
+def _mm_to_eletroduto_inches(value_mm: float) -> float:
+    trade_sizes = (
+        (16, 0.5),
+        (20, 0.75),
+        (25, 1.0),
+        (32, 1.25),
+        (40, 1.5),
+        (50, 2.0),
+        (65, 2.5),
+        (75, 3.0),
+        (100, 4.0),
+    )
+    closest = min(trade_sizes, key=lambda item: abs(item[0] - value_mm))
+    return closest[1]
+
+
+def _extract_mt_diametro_eletroduto_pol(text: str) -> FieldExtraction | None:
+    candidates: list[tuple[float, str]] = []
+    for pattern in (
+        r"eletroduto\s*:.{0,260}?[⌀Ø∅]\s*(\d+(?:[.,]\d+)?)\s*mm\b",
+        r"eletroduto.{0,120}?[⌀Ø∅]\s*(\d+(?:[.,]\d+)?)\s*mm\b",
+        r"eletroduto.{0,80}?(\d+(?:[.,]\d+)?)\s*mm\b",
+    ):
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE | re.DOTALL):
+            candidates.append((float(match.group(1).replace(",", ".")), match.group(0)))
+    if not candidates:
+        return None
+    value_mm, evidence = max(candidates, key=lambda item: item[0])
+    value = _mm_to_eletroduto_inches(value_mm)
+    return FieldExtraction(
+        value=value,
+        evidence=_normalize_text(evidence),
+        rule="mt_eletroduto_diameter_mm_regex",
+        confidence="medium",
+    )
+
+
 def _extract_secao_cabo_cobre_mm2(text: str) -> FieldExtraction | None:
     result = _extract_numeric_value(
         patterns=[
@@ -1202,6 +1240,7 @@ def map_extraction_to_partial_context(extraction_result: ProjectExtractionResult
     add("aterramento.secao_cabo_cobre_mm2", _extract_secao_cabo_cobre_mm2(text))
 
     add("mt.tensao_kv", _extract_mt_tensao_kv(text))
+    add("mt.diametro_eletroduto_pol", _extract_mt_diametro_eletroduto_pol(text))
     add("mt.secao_cabo_mm2", _extract_mt_secao_cabo_mm2(text))
 
     add("instalacao.perfilado_tipo", _extract_perfilado_tipo(raw_text))
@@ -1335,6 +1374,8 @@ def _glp_v2_main_pipe_windows(raw_text: str) -> list[str]:
     for pattern in (
         r"ramal(?:\s+interno)?(?:\s+prim[aá]rio)?",
         r"tubula[cç][ãa]o\s+principal",
+        r"tubula[cç][ãa]o\s+em\s+a[cç]o\s+carbono",
+        r"tubula[cç][ãa]o[^\n]{0,90}\bsubsolo\b",
     ):
         for match in re.finditer(pattern, raw_text, flags=re.IGNORECASE):
             window = raw_text[match.start() : match.start() + 220]
