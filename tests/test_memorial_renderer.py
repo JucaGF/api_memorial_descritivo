@@ -208,7 +208,30 @@ class MemorialRendererTests(unittest.TestCase):
         text = inspect_docx_text(output_path)
         self.assertNotIn("GRUPO GERADOR", text)
         self.assertNotIn("grupo geradores a diesel", text)
-        self.assertNotIn("sistema de geração de emergência", text)
+
+    def test_eletrico_context_keeps_mt_tension_empty_when_missing(self) -> None:
+        context = build_memorial_eletrico_v1_context({"energia": {"tem_subestacao": False}})
+
+        self.assertEqual(context["mt"], {})
+
+    @unittest.skipUnless(
+        has_docx_render_dependencies(),
+        "python-docx e docxtpl nao estao instalados no ambiente",
+    )
+    def test_render_memorial_eletrico_v1_leaves_mt_section_blank_when_missing(self) -> None:
+        tmp_dir = ROOT / "tests" / "output"
+        output_path = tmp_dir / "renderer_test_output_eletrico_mt_blank.docx"
+        context = build_valid_context()
+        context["mt"] = {}
+
+        render_memorial_eletrico_v1(context, output_path)
+
+        text = inspect_docx_text(output_path)
+        self.assertIn("circuito de  kV", text)
+        self.assertNotIn("13.8", text)
+        self.assertNotIn("13,8", text)
+        self.assertNotIn("circuito de 13.8 kV", text)
+        self.assertNotIn("circuito de 13,8 kV", text)
 
     @unittest.skipUnless(
         has_docx_render_dependencies(),

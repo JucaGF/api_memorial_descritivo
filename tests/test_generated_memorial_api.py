@@ -494,6 +494,103 @@ class GeneratedMemorialApiTests(unittest.TestCase):
 
         get_mock.assert_called_once_with("abc-123", include_context=False)
 
+    @patch("app.api.routes.create_generated_memorial")
+    @patch("app.api.routes.generate_memorial_glp_v2")
+    @patch("app.api.routes.get_generated_memorial_record")
+    def test_correct_persisted_memorial_creates_new_version_for_any_type(
+        self,
+        get_record_mock,
+        generate_mock,
+        create_mock,
+    ) -> None:
+        from app.services.pipeline import PipelineResult
+
+        original_created_at = datetime.now(tz=timezone.utc).isoformat()
+        get_record_mock.return_value = {
+            "id": "old-123",
+            "type": "glp_v2",
+            "project_name": "Memorial GLP v2",
+            "status": "ready",
+            "observations": "Observacao original",
+            "pdf_filenames": ["gas.pdf"],
+            "final_context": {
+                "obra": {"nome": "MGAMAK", "qtd_apartamentos": 30},
+                "pontos_utilizacao": {"fogao": {"quantidade": 34}},
+            },
+            "extraction_report": {
+                "missing": [],
+                "evidence": {
+                    "obra.qtd_apartamentos": {
+                        "value": 30,
+                        "rule": "apartment_visual_labels",
+                        "evidence": "APTO 001...801",
+                        "confidence": "low",
+                    }
+                },
+            },
+            "conflicts": [],
+            "context_version": "glp_v2",
+            "template_version": "glp_v2",
+            "created_at": original_created_at,
+            "updated_at": original_created_at,
+        }
+        generate_mock.return_value = PipelineResult(
+            context={
+                "obra": {"nome": "MGAMAK", "qtd_apartamentos": 29},
+                "pontos_utilizacao": {"fogao": {"quantidade": 35}},
+            },
+            output_path=Path("/tmp/memorial_glp_v2_corrigido.docx"),
+        )
+        create_mock.return_value = _memorial(memorial_id="new-456", memorial_type="glp_v2")
+
+        payload = routes.MemorialCorrectionsPayload(
+            corrections={
+                "obra": {"qtd_apartamentos": 29},
+                "pontos_utilizacao": {"fogao": {"quantidade": 35}},
+            }
+        )
+        response = routes.correct_persisted_memorial(
+            "old-123",
+            payload,
+            _request("POST", "/api/v1/memoriais/old-123/correcoes"),
+        )
+
+        self.assertEqual(response.id, "new-456")
+        generate_mock.assert_called_once()
+        corrected_context = generate_mock.call_args.args[0]
+        self.assertEqual(corrected_context["obra"]["qtd_apartamentos"], 29)
+        self.assertEqual(
+            corrected_context["pontos_utilizacao"]["fogao"]["quantidade"],
+            35,
+        )
+        create_kwargs = create_mock.call_args.kwargs
+        self.assertEqual(create_kwargs["memorial_type"], "glp_v2")
+        self.assertEqual(create_kwargs["pdf_filenames"], ["gas.pdf"])
+        self.assertEqual(create_kwargs["extraction_report"]["user_corrections"]["obra.qtd_apartamentos"], 29)
+        self.assertEqual(
+            create_kwargs["extraction_report"]["user_corrections"]["pontos_utilizacao.fogao.quantidade"],
+            35,
+        )
+
+    @patch("app.api.routes.get_generated_memorial_record")
+    def test_correct_persisted_memorial_requires_stored_context(self, get_record_mock) -> None:
+        get_record_mock.return_value = {
+            "id": "old-123",
+            "type": "telecom",
+            "status": "ready",
+            "final_context": None,
+        }
+
+        response = routes.correct_persisted_memorial(
+            "old-123",
+            routes.MemorialCorrectionsPayload(corrections={"obra": {"nome": "Novo"}}),
+            _request("POST", "/api/v1/memoriais/old-123/correcoes"),
+        )
+
+        self.assertEqual(response.status_code, 409)
+        body = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(body["error"]["code"], "generated_memorial_context_missing")
+
 
 if __name__ == "__main__":
     unittest.main()

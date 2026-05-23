@@ -301,11 +301,47 @@ class NewExtractorsTests(unittest.TestCase):
 
         self.assertEqual(context["obra"]["qtd_apartamentos"], 24)
 
+    def test_unique_apartment_ids_ignore_apto_001_service_unit(self) -> None:
+        raw_text = """
+        APTO 801
+        APTO 704 APTO 703 APTO 702 APTO 701
+        APTO 604 APTO 603 APTO 602 APTO 601
+        APTO 504 APTO 503 APTO 502 APTO 501
+        APTO 404 APTO 403 APTO 402 APTO 401
+        APTO 304 APTO 303 APTO 302 APTO 301
+        APTO 204 APTO 203 APTO 202 APTO 201
+        APTO 104 APTO 103 APTO 102 APTO 101
+        APTO 001
+        """
+        context = map_extraction_to_partial_context(build_extraction_result(raw_text)).context
+
+        self.assertEqual(context["obra"]["qtd_apartamentos"], 29)
+
     def test_extracts_secao_cabo_cobre_mm2(self) -> None:
         raw_text = "Malha de aterramento em cabo de cobre 50mm²."
         context = map_extraction_to_partial_context(build_extraction_result(raw_text)).context
 
         self.assertEqual(context["aterramento"]["secao_cabo_cobre_mm2"], 50)
+
+    def test_extracts_energisa_eletroduto_diameter_from_mm_callout(self) -> None:
+        raw_text = """
+        DETALHE FIXAÇÃO DO ELETRODUTO
+        ELETRODUTO ∅ 1/2", 3/4", 1"
+        BUCHA DE EXPANSÃO - NYLON - ∅ 10mm
+        ELETRODUTO:
+        AÇO GALVANIZADO
+        175 A
+        275 V
+        40 kA
+        # 95
+        # 50
+        PAINEL 01
+        PROTEÇÃO GERAL: 175 A
+        ⌀ 65 mm
+        """
+        context = map_extraction_to_partial_context(build_extraction_result(raw_text)).context
+
+        self.assertEqual(context["mt"]["diametro_eletroduto_pol"], 2.5)
 
     def test_extracts_numero_cadastro(self) -> None:
         raw_text = "Projeto Nº: 23/2024\nResponsável técnico: Engª Andrea Dias"
@@ -390,7 +426,7 @@ class TelecomExtractionMapperTests(unittest.TestCase):
         self.assertIn("MAX ZAGEL", context["localizacao"])
         self.assertEqual(context["numero_cadastro"], "23/2024")
         self.assertEqual(context["tipo_edificacao"], "Residencial Multifamiliar")
-        self.assertEqual(context["qtd_apartamentos"], 30)
+        self.assertEqual(context["qtd_apartamentos"], 29)
         self.assertEqual(context["qtd_lojas"], 0)
         self.assertEqual(context["qtd_restaurantes"], 0)
         self.assertIn("pavimentos", context["tipologia"].lower())
@@ -426,7 +462,7 @@ class GasNaturalExtractionMapperTests(unittest.TestCase):
         self.assertEqual(context["nome"], "MAKAI")
         self.assertIn("MAX ZAGEL", context["localizacao"])
         self.assertEqual(context["numero_cadastro"], "23/2024")
-        self.assertEqual(context["qtd_apartamentos"], 30)
+        self.assertEqual(context["qtd_apartamentos"], 29)
 
     def test_gas_natural_mapper_derives_typology_from_sheet_filenames(self) -> None:
         extraction_result = ProjectExtractionResult(

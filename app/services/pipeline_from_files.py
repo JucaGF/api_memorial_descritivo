@@ -446,25 +446,29 @@ def _is_schematic_apartment_source(source_file: Any) -> bool:
     return bool(re.search(r"\bcor(?:te)?\s+esquematico\b", text_key))
 
 
-def _extract_schematic_apartment_ids(extraction_result: Any) -> tuple[set[int], list[str]]:
+def _extract_apartment_schedule_ids(extraction_result: Any) -> tuple[set[int], list[str], str]:
     apartment_ids: set[int] = set()
     source_names: list[str] = []
+    source_kind = "apartment_schedule"
     for source_file in list(getattr(extraction_result, "source_files", []) or []):
-        if not _is_schematic_apartment_source(source_file):
-            continue
         text = str(getattr(source_file, "extracted_text", "") or "")
         ids = {
             int(match)
             for match in re.findall(r"\bAPTO\s*0?(\d{3})\b", text, flags=re.IGNORECASE)
         }
         ids = {apt for apt in ids if apt // 100 >= 1}
+        is_schematic = _is_schematic_apartment_source(source_file)
+        if not is_schematic and len(ids) < 8:
+            continue
+        if is_schematic:
+            source_kind = "schematic_apartment_schedule"
         if not ids:
             continue
         apartment_ids.update(ids)
         filename = str(getattr(source_file, "original_filename", "") or "")
         if filename:
             source_names.append(filename)
-    return apartment_ids, source_names
+    return apartment_ids, source_names, source_kind
 
 
 def _apply_schematic_apartment_count_override(
@@ -473,14 +477,15 @@ def _apply_schematic_apartment_count_override(
     *,
     memorial_type: str,
 ) -> tuple[dict[str, Any], list[QuantitativeCandidate], list[dict[str, Any]], list[dict[str, Any]]]:
-    apartment_ids, source_names = _extract_schematic_apartment_ids(extraction_result)
+    apartment_ids, source_names, source_kind = _extract_apartment_schedule_ids(extraction_result)
     if not apartment_ids:
         return context, [], [], []
 
     value = len(apartment_ids)
     source_file = ", ".join(source_names) if source_names else None
+    evidence_source = "corte" if source_kind == "schematic_apartment_schedule" else "agenda/listagem"
     evidence_text = (
-        f"{value} apartamentos identificados no corte "
+        f"{value} apartamentos identificados em {evidence_source} "
         f"(APTO {min(apartment_ids):03d} a APTO {max(apartment_ids):03d})"
     )
     candidate = QuantitativeCandidate(
@@ -491,8 +496,8 @@ def _apply_schematic_apartment_count_override(
         memorial_type=memorial_type,
         source_file=source_file,
         page_number=None,
-        source_kind="schematic_apartment_schedule",
-        extraction_method="schematic_apartment_ids",
+        source_kind=source_kind,
+        extraction_method="apartment_schedule_ids",
         evidence_text=evidence_text,
         confidence="high",
         is_reference_only=False,
@@ -510,8 +515,8 @@ def _apply_schematic_apartment_count_override(
         "status": "resolved",
         "selected_value": value,
         "previous_value": current_value,
-        "rule": f"{memorial_type}_schematic_apartment_count",
-        "message": "Quantidade de apartamentos selecionada pela contagem de APTOs no corte esquematico.",
+        "rule": f"{memorial_type}_apartment_schedule_count",
+        "message": "Quantidade de apartamentos selecionada pela contagem de APTOs em agenda/listagem do projeto.",
         "candidates": [candidate.to_report()],
     }
     return resolved, [candidate], [resolution], []

@@ -328,7 +328,7 @@ class MemorialValidatorTests(unittest.TestCase):
         context["gerador"]["circuitos_atendidos"] = None
         validate_memorial_eletrico_v1_context(context)
 
-    def test_eletrico_context_builder_creates_empty_mt_section_when_missing(self) -> None:
+    def test_eletrico_context_builder_keeps_mt_values_empty_when_missing(self) -> None:
         context = load_fixture()
         context.pop("mt")
 

@@ -91,6 +91,33 @@ def build_schematic_apartment_extraction_result() -> ProjectExtractionResult:
     )
 
 
+def build_energisa_apartment_schedule_extraction_result() -> ProjectExtractionResult:
+    apartment_schedule = """
+    ENERGISA
+    APTO 501 APTO 404 APTO 403 APTO 402 APTO 401
+    APTO 304 APTO 303 APTO 302 APTO 301
+    APTO 204 APTO 203 APTO 202 APTO 201
+    APTO 104 APTO 103 APTO 102 APTO 101
+    APTO 001
+    APTO 801 APTO 704 APTO 703 APTO 702 APTO 701
+    APTO 604 APTO 603 APTO 602 APTO 601
+    APTO 504 APTO 503 APTO 502
+    """
+    return ProjectExtractionResult(
+        raw_text=apartment_schedule,
+        source_files=[
+            ExtractedSourceFile(
+                original_filename="MGAMAK_EL_E-6.0_ENERGISA_V01.pdf",
+                stored_filename="MGAMAK_EL_E-6.0_ENERGISA_V01.pdf",
+                extension=".pdf",
+                saved_path="/tmp/MGAMAK_EL_E-6.0_ENERGISA_V01.pdf",
+                extracted_text=apartment_schedule,
+            )
+        ],
+        signals={"total_files": 1},
+    )
+
+
 def build_glp_v2_quantitative_extraction_result() -> ProjectExtractionResult:
     tipo = """
     QUADRO DE QUANTITATIVO MEDIÇÃO
@@ -367,6 +394,31 @@ class LLMPrimaryPathTests(unittest.TestCase):
         self.assertEqual(
             report.cross_validation["quantitative_resolutions"][0]["field_path"],
             "obra.qtd_apartamentos",
+        )
+
+    @patch("app.services.pipeline_from_files.assess_extraction_coverage")
+    @patch("app.services.pipeline_from_files.extract_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_eletrico_prefers_energisa_apartment_schedule_over_llm_value(
+        self,
+        extract_files_mock,
+        extract_llm_mock,
+        assess_mock,
+    ) -> None:
+        ingested_files = [build_ingested_file()]
+        extract_files_mock.return_value = build_energisa_apartment_schedule_extraction_result()
+        extract_llm_mock.return_value = LLMExtractionRunResult(
+            context={"obra": {"construtora": "LLM Corp", "qtd_apartamentos": 30}}
+        )
+        assess_mock.return_value = build_extraction_report()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result_mapping, report = extract_mapping_from_ingested_files(ingested_files)
+
+        self.assertEqual(result_mapping.context["obra"]["qtd_apartamentos"], 29)
+        self.assertEqual(
+            report.cross_validation["quantitative_resolutions"][0]["rule"],
+            "eletrico_apartment_schedule_count",
         )
 
     @patch("app.services.pipeline_from_files.map_extraction_to_partial_context")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -23,6 +24,7 @@ from app.schemas.generated_memorial import (
     GeneratedMemorialDownloadResponse,
     GeneratedMemorialListResponse,
     GeneratedMemorialResponse,
+    MemorialCorrectionsPayload,
 )
 from app.schemas.review_session import (
     ContextCorrectionsPayload,
@@ -57,6 +59,7 @@ from app.services.pipeline import (
     generate_memorial_eletrico_v1,
     generate_memorial_gas_natural_v1,
     generate_memorial_glp_v1,
+    generate_memorial_glp_v2,
     generate_memorial_telecom_v1,
 )
 from app.services.pipeline_from_files import (
@@ -92,6 +95,7 @@ _PROJECT_NAME_BY_TYPE = {
     "telecom": "Memorial Telecom",
     "gas-natural": "Memorial Gás Natural",
     "glp": "Memorial GLP",
+    "glp_v2": "Memorial GLP v2",
 }
 
 
@@ -207,6 +211,8 @@ _TEMPLATE_VERSION_BY_TYPE = {
     "glp": "glp_v1",
 }
 _CONTEXT_VERSION_BY_TYPE = _TEMPLATE_VERSION_BY_TYPE
+_CONTEXT_VERSION_BY_TYPE["glp_v2"] = "glp_v2"
+_TEMPLATE_VERSION_BY_TYPE["glp_v2"] = "glp_v2"
 
 
 async def _generate_memorial_from_uploaded_files(
@@ -223,6 +229,50 @@ async def _generate_memorial_from_uploaded_files(
     if memorial_type == "glp":
         return await generate_memorial_glp_v1_from_uploaded_files(files, output_path)
     raise ValueError(f"Tipo de memorial não suportado: {memorial_type}.")
+
+
+def _generate_memorial_from_context(
+    memorial_type: str,
+    context: dict[str, Any],
+    output_path: Path,
+):
+    if memorial_type == "eletrico":
+        return generate_memorial_eletrico_v1(context, output_path)
+    if memorial_type == "telecom":
+        return generate_memorial_telecom_v1(context, output_path)
+    if memorial_type == "gas-natural":
+        return generate_memorial_gas_natural_v1(context, output_path)
+    if memorial_type == "glp":
+        return generate_memorial_glp_v1(context, output_path)
+    if memorial_type == "glp_v2":
+        return generate_memorial_glp_v2(context, output_path)
+    raise ValueError(f"Tipo de memorial não suportado: {memorial_type}.")
+
+
+def _flatten_corrections(
+    corrections: dict[str, Any],
+    prefix: str = "",
+) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for key, value in corrections.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            flattened.update(_flatten_corrections(value, path))
+        else:
+            flattened[path] = value
+    return flattened
+
+
+def _report_with_user_corrections(
+    extraction_report: dict[str, Any] | None,
+    corrections: dict[str, Any],
+) -> dict[str, Any]:
+    report = deepcopy(extraction_report) if isinstance(extraction_report, dict) else {}
+    existing = report.get("user_corrections")
+    user_corrections = existing if isinstance(existing, dict) else {}
+    user_corrections.update(_flatten_corrections(corrections))
+    report["user_corrections"] = user_corrections
+    return report
 
 
 def _extraction_report_to_jsonable(report: Any) -> dict[str, Any] | None:
@@ -328,6 +378,8 @@ def _validation_detail_for_type(memorial_type: str) -> str:
         return "Payload invalido para o memorial telecom v1."
     if memorial_type == "gas-natural":
         return "Payload invalido para o memorial gas natural v1."
+    if memorial_type == "glp_v2":
+        return "Payload invalido para o memorial GLP v2."
     return "Payload invalido para o memorial GLP v1."
 
 
@@ -399,6 +451,125 @@ def get_persisted_memorial(
             message="Memorial não encontrado.",
         )
     return memorial
+
+
+@router.post(
+    "/api/v1/memoriais/{memorial_id}/correcoes",
+    response_model=GeneratedMemorialResponse,
+    status_code=201,
+)
+def correct_persisted_memorial(
+    memorial_id: str,
+    payload: MemorialCorrectionsPayload,
+    request: Request,
+):
+    record = get_generated_memorial_record(memorial_id)
+    if record is None:
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="generated_memorial_not_found",
+            message="Memorial não encontrado.",
+        )
+
+    memorial_type = str(record.get("type") or "")
+    if memorial_type not in _SUPPORTED_MEMORIAL_LIST_TYPES:
+        return _unsupported_memorial_type_response(memorial_type, request=request)
+
+    final_context = record.get("final_context")
+    if not isinstance(final_context, dict):
+        return build_error_response(
+            status_code=409,
+            code="generated_memorial_context_missing",
+            message=(
+                "Este memorial não possui contexto salvo para correção. "
+                "Gere novamente para habilitar revisão pelo dashboard."
+            ),
+            request_id=get_request_id(request),
+        )
+    if not payload.corrections:
+        return build_client_error_response(
+            request=request,
+            status_code=400,
+            code="empty_corrections",
+            message="Envie ao menos uma correção para gerar uma nova versão.",
+        )
+
+    corrected_context = merge_context(final_context, payload.corrections)
+    corrected_report = _report_with_user_corrections(
+        record.get("extraction_report"),
+        payload.corrections,
+    )
+
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    rendered_output_path = output_path
+    try:
+        pipeline_result = _generate_memorial_from_context(
+            memorial_type,
+            corrected_context,
+            output_path,
+        )
+        rendered_output_path = getattr(pipeline_result, "output_path", output_path)
+        generated_context = getattr(pipeline_result, "context", corrected_context)
+        return create_generated_memorial(
+            memorial_type=memorial_type,
+            project_name=record.get("project_name") or _PROJECT_NAME_BY_TYPE[memorial_type],
+            output_path=rendered_output_path,
+            pdf_filenames=record.get("pdf_filenames") or [],
+            observations=record.get("observations"),
+            final_context=generated_context,
+            extraction_report=corrected_report,
+            conflicts=_extract_conflicts_from_report(corrected_report),
+            context_version=record.get("context_version")
+            or _CONTEXT_VERSION_BY_TYPE.get(memorial_type),
+            template_version=record.get("template_version")
+            or _TEMPLATE_VERSION_BY_TYPE.get(memorial_type),
+        )
+    except MemorialValidationError as error:
+        _log_validation_failure(
+            request,
+            memorial_type,
+            error,
+            "Generated memorial correction validation failed",
+        )
+        return _validation_error_response(
+            error, _validation_detail_for_type(memorial_type), request=request
+        )
+    except MemorialRenderError as error:
+        logger.error(
+            "Generated memorial correction render failed method=%s path=%s request_id=%s memorial_id=%s memorial_type=%s error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            memorial_id,
+            memorial_type,
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_internal_server_error_response(request)
+    except GeneratedMemorialStorageError as error:
+        logger.error(
+            "Generated memorial correction persistence failed method=%s path=%s request_id=%s memorial_id=%s memorial_type=%s error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            memorial_id,
+            memorial_type,
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_error_response(
+            status_code=503,
+            code="generated_memorial_storage_error",
+            message="Armazenamento do memorial indisponível.",
+            request_id=get_request_id(request),
+        )
+    finally:
+        _remove_file(output_path)
+        if rendered_output_path != output_path:
+            _remove_file(rendered_output_path)
 
 
 @router.get(
