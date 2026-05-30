@@ -19,6 +19,11 @@ class ReviewItemResponse(BaseModel):
     editable_type: str
 
 
+class MemorialCreatorResponse(BaseModel):
+    user_id: str
+    display_name: str
+
+
 class GeneratedMemorialResponse(BaseModel):
     id: str
     type: str
@@ -31,6 +36,7 @@ class GeneratedMemorialResponse(BaseModel):
     download_url: str
     context_version: str | None = None
     template_version: str | None = None
+    created_by: MemorialCreatorResponse | None = None
     final_context: dict[str, Any] | None = None
     extraction_report: dict[str, Any] | None = None
     conflicts: list[dict[str, Any]] | None = None

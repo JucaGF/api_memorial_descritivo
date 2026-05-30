@@ -29,7 +29,7 @@ def _client() -> Any:
     return _client_instance
 
 
-def create_session() -> str:
+def create_session(owner_user_id: str = "") -> str:
     session_id = str(uuid.uuid4())
     now = datetime.now(tz=timezone.utc)
     _client().table("review_sessions").insert({
@@ -37,6 +37,7 @@ def create_session() -> str:
         "status": STATUS_PROCESSING,
         "created_at": now.isoformat(),
         "expires_at": (now + _SESSION_TTL).isoformat(),
+        "owner_user_id": owner_user_id,
         "partial_context": {},
         "extraction_report": {},
         "corrections": {},
@@ -45,14 +46,16 @@ def create_session() -> str:
     return session_id
 
 
-def load_session(session_id: str) -> ReviewSession | None:
-    response = (
+def load_session(session_id: str, owner_user_id: str | None = None) -> ReviewSession | None:
+    query = (
         _client()
         .table("review_sessions")
         .select("*")
         .eq("session_id", session_id)
-        .execute()
     )
+    if owner_user_id is not None:
+        query = query.eq("owner_user_id", owner_user_id)
+    response = query.execute()
     if not response.data:
         return None
     session = ReviewSession(**response.data[0])
@@ -66,14 +69,17 @@ def save_session(session: ReviewSession) -> None:
     _client().table("review_sessions").upsert(asdict(session)).execute()
 
 
-def update_session(session_id: str, **kwargs: Any) -> ReviewSession | None:
-    session = load_session(session_id)
+def update_session(session_id: str, owner_user_id: str | None = None, **kwargs: Any) -> ReviewSession | None:
+    session = load_session(session_id, owner_user_id)
     if session is None:
         return None
     data = asdict(session)
     data.update(kwargs)
     updated = ReviewSession(**data)
-    _client().table("review_sessions").update(kwargs).eq("session_id", session_id).execute()
+    query = _client().table("review_sessions").update(kwargs).eq("session_id", session_id)
+    if owner_user_id is not None:
+        query = query.eq("owner_user_id", owner_user_id)
+    query.execute()
     return updated
 
 

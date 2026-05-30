@@ -14,6 +14,7 @@ from starlette.datastructures import UploadFile
 from starlette.middleware.cors import CORSMiddleware
 
 import app.api.routes as routes
+from app.api.auth import CurrentUser
 from app.main import app
 from app.schemas.generated_memorial import GeneratedMemorialResponse
 from app.services.generated_memorial_store import (
@@ -44,6 +45,16 @@ def _request(method: str = "GET", path: str = "/api/v1/memoriais") -> MagicMock:
     request.method = method
     request.url.path = path
     return request
+
+
+def _current_user() -> CurrentUser:
+    return CurrentUser(
+        user_id="user-123",
+        email="usuario@example.com",
+        display_name="Usuario Teste",
+        role="user",
+        status="active",
+    )
 
 
 class GeneratedMemorialApiTests(unittest.TestCase):
@@ -139,6 +150,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
                 MagicMock(),
                 files,
                 "Observacao",
+                _current_user(),
             )
         )
 
@@ -149,6 +161,8 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         self.assertEqual(response.download_url, "https://signed.example/download")
         create_mock.assert_called_once()
         self.assertEqual(create_mock.call_args.kwargs["memorial_type"], "telecom")
+        self.assertEqual(create_mock.call_args.kwargs["owner_user_id"], "user-123")
+        self.assertEqual(create_mock.call_args.kwargs["created_by_name"], "Usuario Teste")
         self.assertEqual(create_mock.call_args.kwargs["observations"], "Observacao")
 
     @patch("app.api.routes.create_generated_memorial")
@@ -181,6 +195,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
                 request,
                 files,
                 "Observacao",
+                _current_user(),
             )
         )
 
@@ -231,6 +246,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
                     request,
                     files,
                     None,
+                    _current_user(),
                 )
             )
 
@@ -246,7 +262,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memoriais_lists_persisted_memorials(self, list_mock) -> None:
         list_mock.return_value = [_memorial()]
 
-        response = routes.list_persisted_memorials(_request(), type="telecom")
+        response = routes.list_persisted_memorials(_request(), type="telecom", current_user=_current_user())
 
         self.assertEqual(len(response.memorials), 1)
         self.assertEqual(response.memorials[0].type, "telecom")
@@ -256,7 +272,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memoriais_accepts_glp_v2_filter(self, list_mock) -> None:
         list_mock.return_value = [_memorial(memorial_type="glp_v2")]
 
-        response = routes.list_persisted_memorials(_request(), type="glp_v2")
+        response = routes.list_persisted_memorials(_request(), type="glp_v2", current_user=_current_user())
 
         self.assertEqual(len(response.memorials), 1)
         self.assertEqual(response.memorials[0].type, "glp_v2")
@@ -266,7 +282,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memorial_returns_404_for_unknown_id(self, get_mock) -> None:
         get_mock.return_value = None
 
-        response = routes.get_persisted_memorial("missing", _request())
+        response = routes.get_persisted_memorial("missing", _request(), current_user=_current_user())
 
         self.assertEqual(response.status_code, 404)
         body = json.loads(response.body.decode("utf-8"))
@@ -277,7 +293,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memorial_returns_detail(self, get_mock) -> None:
         get_mock.return_value = _memorial()
 
-        response = routes.get_persisted_memorial("abc-123", _request())
+        response = routes.get_persisted_memorial("abc-123", _request(), current_user=_current_user())
 
         self.assertEqual(response.id, "abc-123")
 
@@ -298,7 +314,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         request.method = "GET"
         request.url.path = "/api/v1/memoriais/abc-123/download"
 
-        response = routes.get_persisted_memorial_download("abc-123", request)
+        response = routes.get_persisted_memorial_download("abc-123", request, current_user=_current_user())
 
         self.assertEqual(response.download_url, "https://signed.example/download")
 
@@ -323,7 +339,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         request.method = "GET"
         request.url.path = "/api/v1/memoriais/abc-123/download"
 
-        response = routes.get_persisted_memorial_download("abc-123", request)
+        response = routes.get_persisted_memorial_download("abc-123", request, current_user=_current_user())
 
         self.assertIsInstance(response, JSONResponse)
         self.assertEqual(response.status_code, 404)
@@ -353,7 +369,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         request.method = "GET"
         request.url.path = "/api/v1/memoriais/abc-123/download"
 
-        response = routes.get_persisted_memorial_download("abc-123", request)
+        response = routes.get_persisted_memorial_download("abc-123", request, current_user=_current_user())
 
         self.assertIsInstance(response, JSONResponse)
         self.assertEqual(response.status_code, 503)
@@ -381,7 +397,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         request.method = "GET"
         request.url.path = "/api/v1/memoriais/abc-123/download"
 
-        response = routes.get_persisted_memorial_download("abc-123", request)
+        response = routes.get_persisted_memorial_download("abc-123", request, current_user=_current_user())
 
         self.assertIsInstance(response, JSONResponse)
         self.assertEqual(response.status_code, 409)
@@ -393,18 +409,18 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         delete_mock.return_value = True
 
         response = routes.delete_persisted_memorial(
-            "abc-123", _request("DELETE", "/api/v1/memoriais/abc-123")
+            "abc-123", _request("DELETE", "/api/v1/memoriais/abc-123"), current_user=_current_user()
         )
 
         self.assertEqual(response.status_code, 204)
-        delete_mock.assert_called_once_with("abc-123")
+        delete_mock.assert_called_once_with("abc-123", owner_user_id="user-123")
 
     @patch("app.api.routes.delete_generated_memorial")
     def test_delete_memorial_returns_404_when_missing(self, delete_mock) -> None:
         delete_mock.return_value = False
 
         response = routes.delete_persisted_memorial(
-            "missing", _request("DELETE", "/api/v1/memoriais/missing")
+            "missing", _request("DELETE", "/api/v1/memoriais/missing"), current_user=_current_user()
         )
 
         self.assertEqual(response.status_code, 404)
@@ -421,7 +437,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         request.method = "DELETE"
         request.url.path = "/api/v1/memoriais/abc-123"
 
-        response = routes.delete_persisted_memorial("abc-123", request)
+        response = routes.delete_persisted_memorial("abc-123", request, current_user=_current_user())
 
         self.assertIsInstance(response, JSONResponse)
         self.assertEqual(response.status_code, 503)
@@ -466,6 +482,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
                 MagicMock(),
                 files,
                 None,
+                _current_user(),
             )
         )
 
@@ -482,7 +499,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memorial_with_include_context_propagates_flag(self, get_mock) -> None:
         get_mock.return_value = _memorial()
 
-        routes.get_persisted_memorial("abc-123", _request(), include_context=True)
+        routes.get_persisted_memorial("abc-123", _request(), include_context=True, current_user=_current_user())
 
         get_mock.assert_called_once_with("abc-123", include_context=True)
 
@@ -490,7 +507,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
     def test_get_memorial_default_does_not_request_context(self, get_mock) -> None:
         get_mock.return_value = _memorial()
 
-        routes.get_persisted_memorial("abc-123", _request())
+        routes.get_persisted_memorial("abc-123", _request(), current_user=_current_user())
 
         get_mock.assert_called_once_with("abc-123", include_context=False)
 
@@ -553,6 +570,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
             "old-123",
             payload,
             _request("POST", "/api/v1/memoriais/old-123/correcoes"),
+            _current_user(),
         )
 
         self.assertEqual(response.id, "new-456")
@@ -565,6 +583,8 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         )
         create_kwargs = create_mock.call_args.kwargs
         self.assertEqual(create_kwargs["memorial_type"], "glp_v2")
+        self.assertEqual(create_kwargs["owner_user_id"], "user-123")
+        self.assertEqual(create_kwargs["created_by_name"], "Usuario Teste")
         self.assertEqual(create_kwargs["pdf_filenames"], ["gas.pdf"])
         self.assertEqual(create_kwargs["extraction_report"]["user_corrections"]["obra.qtd_apartamentos"], 29)
         self.assertEqual(
@@ -585,6 +605,7 @@ class GeneratedMemorialApiTests(unittest.TestCase):
             "old-123",
             routes.MemorialCorrectionsPayload(corrections={"obra": {"nome": "Novo"}}),
             _request("POST", "/api/v1/memoriais/old-123/correcoes"),
+            _current_user(),
         )
 
         self.assertEqual(response.status_code, 409)

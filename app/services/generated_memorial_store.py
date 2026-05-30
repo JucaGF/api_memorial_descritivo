@@ -165,6 +165,10 @@ def _response_from_record(
         "download_url": download_url,
         "context_version": record.get("context_version"),
         "template_version": record.get("template_version"),
+        "created_by": {
+            "user_id": str(record.get("owner_user_id") or ""),
+            "display_name": str(record.get("created_by_name") or "Criador não informado"),
+        } if record.get("owner_user_id") or record.get("created_by_name") else None,
     }
     if include_context:
         payload["final_context"] = record.get("final_context")
@@ -181,6 +185,8 @@ def _response_from_record(
 def create_generated_memorial(
     *,
     memorial_type: str,
+    owner_user_id: str,
+    created_by_name: str,
     project_name: str,
     output_path: Path,
     pdf_filenames: list[str],
@@ -200,6 +206,8 @@ def create_generated_memorial(
         "id": memorial_id,
         "type": memorial_type,
         "project_name": project_name,
+        "owner_user_id": owner_user_id,
+        "created_by_name": created_by_name,
         "status": STATUS_PROCESSING,
         "observations": observations,
         "pdf_filenames": pdf_filenames,
@@ -256,8 +264,14 @@ def create_generated_memorial(
     )
 
 
-def list_generated_memorials(memorial_type: str | None = None) -> list[GeneratedMemorialResponse]:
+def list_generated_memorials(
+    memorial_type: str | None = None,
+    *,
+    owner_user_id: str | None = None,
+) -> list[GeneratedMemorialResponse]:
     query = _client().table(GENERATED_MEMORIALS_TABLE).select("*").order("created_at", desc=True)
+    if owner_user_id:
+        query = query.eq("owner_user_id", owner_user_id)
     if memorial_type:
         response = query.eq("type", memorial_type).execute()
     else:
@@ -268,14 +282,20 @@ def list_generated_memorials(memorial_type: str | None = None) -> list[Generated
     ]
 
 
-def get_generated_memorial_record(memorial_id: str) -> dict[str, Any] | None:
-    response = (
+def get_generated_memorial_record(
+    memorial_id: str,
+    *,
+    owner_user_id: str | None = None,
+) -> dict[str, Any] | None:
+    query = (
         _client()
         .table(GENERATED_MEMORIALS_TABLE)
         .select("*")
         .eq("id", memorial_id)
-        .execute()
     )
+    if owner_user_id:
+        query = query.eq("owner_user_id", owner_user_id)
+    response = query.execute()
     if not response.data:
         return None
     return response.data[0]
@@ -285,15 +305,20 @@ def get_generated_memorial(
     memorial_id: str,
     *,
     include_context: bool = False,
+    owner_user_id: str | None = None,
 ) -> GeneratedMemorialResponse | None:
-    record = get_generated_memorial_record(memorial_id)
+    record = get_generated_memorial_record(memorial_id, owner_user_id=owner_user_id)
     if record is None:
         return None
     return _response_from_record(record, include_context=include_context)
 
 
-def delete_generated_memorial(memorial_id: str) -> bool:
-    record = get_generated_memorial_record(memorial_id)
+def delete_generated_memorial(
+    memorial_id: str,
+    *,
+    owner_user_id: str | None = None,
+) -> bool:
+    record = get_generated_memorial_record(memorial_id, owner_user_id=owner_user_id)
     if record is None:
         return False
 

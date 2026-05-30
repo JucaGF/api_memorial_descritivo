@@ -113,7 +113,11 @@ def get_settings() -> AppSettings:
 
     generated_memorials_bucket = os.getenv("GENERATED_MEMORIALS_BUCKET", "").strip()
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
-    supabase_key = os.getenv("SUPABASE_KEY", "").strip()
+    supabase_key = (
+        os.getenv("SUPABASE_SECRET_KEY", "").strip()
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        or os.getenv("SUPABASE_KEY", "").strip()
+    )
     signed_url_ttl_seconds = _parse_positive_int(
         os.getenv("GENERATED_MEMORIALS_SIGNED_URL_TTL"),
         "GENERATED_MEMORIALS_SIGNED_URL_TTL",
@@ -127,7 +131,7 @@ def get_settings() -> AppSettings:
             )
         if not supabase_url or not supabase_key:
             raise ConfigurationError(
-                "SUPABASE_URL e SUPABASE_KEY devem ser configurados para os memoriais persistidos em production."
+                "SUPABASE_URL e SUPABASE_SECRET_KEY/SUPABASE_SERVICE_ROLE_KEY devem ser configurados para os memoriais persistidos em production."
             )
 
     if not generated_memorials_bucket:

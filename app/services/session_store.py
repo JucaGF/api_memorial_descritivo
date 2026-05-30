@@ -21,6 +21,7 @@ class ReviewSession:
     status: str
     created_at: str
     expires_at: str
+    owner_user_id: str = ""
     partial_context: dict[str, Any] = field(default_factory=dict)
     extraction_report: dict[str, Any] = field(default_factory=dict)
     corrections: dict[str, Any] = field(default_factory=dict)
@@ -48,7 +49,7 @@ def _is_session_expired(session: ReviewSession) -> bool:
     return _parse_datetime(session.expires_at) <= datetime.now(tz=timezone.utc)
 
 
-def create_session() -> str:
+def create_session(owner_user_id: str = "") -> str:
     _ensure_dir()
     session_id = str(uuid.uuid4())
     now = datetime.now(tz=timezone.utc)
@@ -57,6 +58,7 @@ def create_session() -> str:
         status=STATUS_PROCESSING,
         created_at=now.isoformat(),
         expires_at=(now + _SESSION_TTL).isoformat(),
+        owner_user_id=owner_user_id,
     )
     _session_path(session_id).write_text(
         json.dumps(asdict(session), ensure_ascii=False, indent=2),
@@ -65,7 +67,7 @@ def create_session() -> str:
     return session_id
 
 
-def load_session(session_id: str) -> ReviewSession | None:
+def load_session(session_id: str, owner_user_id: str | None = None) -> ReviewSession | None:
     path = _session_path(session_id)
     if not path.exists():
         return None
@@ -73,6 +75,8 @@ def load_session(session_id: str) -> ReviewSession | None:
     session = ReviewSession(**data)
     if _is_session_expired(session):
         path.unlink(missing_ok=True)
+        return None
+    if owner_user_id is not None and session.owner_user_id != owner_user_id:
         return None
     return session
 
@@ -85,8 +89,8 @@ def save_session(session: ReviewSession) -> None:
     )
 
 
-def update_session(session_id: str, **kwargs: Any) -> ReviewSession | None:
-    session = load_session(session_id)
+def update_session(session_id: str, owner_user_id: str | None = None, **kwargs: Any) -> ReviewSession | None:
+    session = load_session(session_id, owner_user_id)
     if session is None:
         return None
     data = asdict(session)

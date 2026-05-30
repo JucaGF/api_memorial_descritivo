@@ -27,6 +27,8 @@ def _record(memorial_id: str = "abc-123", memorial_type: str = "telecom") -> dic
         "id": memorial_id,
         "type": memorial_type,
         "project_name": "Memorial Telecom",
+        "owner_user_id": "user-123",
+        "created_by_name": "Usuario Teste",
         "status": "ready",
         "observations": "Observacao",
         "pdf_filenames": ["projeto.pdf"],
@@ -64,6 +66,8 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
             Path(temp_file.name).write_bytes(b"PK\x03\x04docx")
             memorial = store.create_generated_memorial(
                 memorial_type="telecom",
+                owner_user_id="user-123",
+                created_by_name="Usuario Teste",
                 project_name="Memorial Telecom",
                 output_path=Path(temp_file.name),
                 pdf_filenames=["projeto.pdf"],
@@ -75,6 +79,8 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
         self.assertTrue(uploaded_path.endswith("/memorial_telecom_v1.docx"))
         inserted = self._table().insert.call_args[0][0]
         self.assertEqual(inserted["type"], "telecom")
+        self.assertEqual(inserted["owner_user_id"], "user-123")
+        self.assertEqual(inserted["created_by_name"], "Usuario Teste")
         self.assertEqual(inserted["project_name"], "Memorial Telecom")
         self.assertEqual(inserted["status"], "processing")
         self.assertEqual(inserted["observations"], "Observacao")
@@ -96,6 +102,8 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
             with self.assertRaises(store.GeneratedMemorialStorageError):
                 store.create_generated_memorial(
                     memorial_type="telecom",
+                    owner_user_id="user-123",
+                    created_by_name="Usuario Teste",
                     project_name="Memorial Telecom",
                     output_path=Path(temp_file.name),
                     pdf_filenames=["projeto.pdf"],
@@ -222,6 +230,8 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
             temp_path.write_bytes(b"PK\x03\x04docx")
             created = store.create_generated_memorial(
                 memorial_type="glp",
+                owner_user_id="user-123",
+                created_by_name="Usuario Teste",
                 project_name="Memorial GLP",
                 output_path=temp_path,
                 pdf_filenames=["projeto.pdf"],

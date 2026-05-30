@@ -13,6 +13,7 @@ from docx import Document
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.api.auth import CurrentUser, require_user
 from app.main import app, create_app
 from app.services.extraction_mapper import ExtractionReport, MappingResult
 from app.services.llm_extractor import LLMExtractionRunResult
@@ -27,6 +28,16 @@ FIXTURES_DIR = ROOT / "tests" / "fixtures"
 PROJECTS_DIR = ROOT / "projects"
 
 
+def _test_current_user() -> CurrentUser:
+    return CurrentUser(
+        user_id="user-123",
+        email="usuario@example.com",
+        display_name="Usuario Teste",
+        role="user",
+        status="active",
+    )
+
+
 def load_fixture(filename: str) -> dict:
     with (FIXTURES_DIR / filename).open("r", encoding="utf-8") as file:
         return json.load(file)
@@ -35,6 +46,7 @@ def load_fixture(filename: str) -> dict:
 class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        app.dependency_overrides[require_user] = _test_current_user
         cls.client = TestClient(app)
 
     def test_health_live_returns_200_with_safe_json(self) -> None:
@@ -784,6 +796,7 @@ class UnifiedErrorEnvelopeTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        app.dependency_overrides[require_user] = _test_current_user
         cls.client = TestClient(app)
 
     def test_upload_invalid_extension_returns_envelope_with_request_id(self) -> None:
@@ -1008,6 +1021,7 @@ def _build_pending_session(session_id: str) -> ReviewSession:
 class ReviewSessionApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        app.dependency_overrides[require_user] = _test_current_user
         cls.client = TestClient(app)
 
     @patch("app.api.routes._process_review_session")

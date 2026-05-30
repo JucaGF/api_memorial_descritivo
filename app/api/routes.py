@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.api.errors import (
@@ -18,6 +18,7 @@ from app.api.errors import (
     format_sanitized_exception_trace,
     get_request_id,
 )
+from app.api.auth import CurrentUser, require_owner, require_user
 from app.config import get_settings
 from app.schemas.file_ingestion import FileIngestionResponse
 from app.schemas.generated_memorial import (
@@ -25,6 +26,14 @@ from app.schemas.generated_memorial import (
     GeneratedMemorialListResponse,
     GeneratedMemorialResponse,
     MemorialCorrectionsPayload,
+)
+from app.schemas.user import (
+    AdminUserListResponse,
+    CreateAdminUserPayload,
+    CurrentUserResponse,
+    UpdateAdminUserPayload,
+    UpdateMyProfilePayload,
+    UserProfileResponse,
 )
 from app.schemas.review_session import (
     ContextCorrectionsPayload,
@@ -79,6 +88,25 @@ from app.services.session_store import (
     load_session,
     update_session,
 )
+from app.services.supabase_auth_admin import (
+    SupabaseAuthAdminError,
+    SupabaseAuthUserAlreadyExistsError,
+    create_auth_user,
+    delete_auth_user,
+)
+from app.services.user_profile_store import (
+    DuplicateUserProfileError,
+    LastOwnerError,
+    SelfManagementError,
+    UserProfile,
+    UserProfileError,
+    UserProfileNotFoundError,
+    create_profile,
+    deactivate_profile_as_owner,
+    list_profiles,
+    update_my_display_name,
+    update_profile_as_owner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +142,161 @@ def health_ready():
     payload = get_readiness_payload()
     status_code = 200 if payload["status"] == "ok" else 503
     return JSONResponse(status_code=status_code, content=payload)
+
+
+def _profile_response(profile: UserProfile | CurrentUser) -> UserProfileResponse:
+    return UserProfileResponse.model_validate(
+        {
+            "user_id": profile.user_id,
+            "email": profile.email,
+            "display_name": profile.display_name,
+            "role": profile.role,
+            "status": profile.status,
+            "created_at": getattr(profile, "created_at", None),
+            "updated_at": getattr(profile, "updated_at", None),
+        }
+    )
+
+
+@router.get("/api/v1/me", response_model=CurrentUserResponse)
+def get_current_user_profile(
+    current_user: CurrentUser = Depends(require_user),
+):
+    return CurrentUserResponse.model_validate(_profile_response(current_user).model_dump())
+
+
+@router.patch("/api/v1/me", response_model=CurrentUserResponse)
+def update_current_user_profile(
+    payload: UpdateMyProfilePayload,
+    request: Request,
+    current_user: CurrentUser = Depends(require_user),
+):
+    try:
+        profile = update_my_display_name(current_user.user_id, payload.display_name)
+        return CurrentUserResponse.model_validate(_profile_response(profile).model_dump())
+    except UserProfileError as error:
+        return build_client_error_response(
+            request=request,
+            status_code=400,
+            code="user_profile_update_failed",
+            message=str(error),
+        )
+
+
+@router.get("/api/v1/admin/users", response_model=AdminUserListResponse)
+def list_admin_users(
+    current_user: CurrentUser = Depends(require_owner),
+):
+    return AdminUserListResponse(
+        users=[_profile_response(profile) for profile in list_profiles()]
+    )
+
+
+@router.post(
+    "/api/v1/admin/users",
+    response_model=UserProfileResponse,
+    status_code=201,
+)
+def create_admin_user(
+    payload: CreateAdminUserPayload,
+    request: Request,
+    current_user: CurrentUser = Depends(require_owner),
+):
+    auth_user = None
+    try:
+        auth_user = create_auth_user(
+            email=payload.email,
+            password=payload.password,
+            display_name=payload.display_name,
+            role=payload.role,
+        )
+        profile = create_profile(
+            user_id=auth_user.user_id,
+            email=auth_user.email,
+            display_name=payload.display_name,
+            role=payload.role,
+            created_by=current_user.user_id,
+        )
+        return _profile_response(profile)
+    except (SupabaseAuthUserAlreadyExistsError, DuplicateUserProfileError) as error:
+        return build_client_error_response(
+            request=request,
+            status_code=409,
+            code="admin_user_already_exists",
+            message=str(error),
+        )
+    except (SupabaseAuthAdminError, UserProfileError) as error:
+        if auth_user is not None:
+            try:
+                delete_auth_user(auth_user.user_id)
+            except SupabaseAuthAdminError:
+                logger.warning(
+                    "Auth user cleanup failed after profile creation error user_id=%s",
+                    auth_user.user_id,
+                )
+        return build_error_response(
+            status_code=503,
+            code="admin_user_create_failed",
+            message=str(error),
+            request_id=get_request_id(request),
+        )
+
+
+@router.patch("/api/v1/admin/users/{user_id}", response_model=UserProfileResponse)
+def update_admin_user(
+    user_id: str,
+    payload: UpdateAdminUserPayload,
+    request: Request,
+    current_user: CurrentUser = Depends(require_owner),
+):
+    try:
+        profile = update_profile_as_owner(
+            target_user_id=user_id,
+            actor_user_id=current_user.user_id,
+            display_name=payload.display_name,
+            role=payload.role,
+            status=payload.status,
+        )
+        return _profile_response(profile)
+    except UserProfileNotFoundError:
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="admin_user_not_found",
+            message="Usuário não encontrado.",
+        )
+    except (SelfManagementError, LastOwnerError, UserProfileError) as error:
+        return build_client_error_response(
+            request=request,
+            status_code=409,
+            code="admin_user_update_not_allowed",
+            message=str(error),
+        )
+
+
+@router.delete("/api/v1/admin/users/{user_id}", response_model=UserProfileResponse)
+def delete_admin_user(
+    user_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(require_owner),
+):
+    try:
+        profile = deactivate_profile_as_owner(user_id, current_user.user_id)
+        return _profile_response(profile)
+    except UserProfileNotFoundError:
+        return build_client_error_response(
+            request=request,
+            status_code=404,
+            code="admin_user_not_found",
+            message="Usuário não encontrado.",
+        )
+    except (SelfManagementError, LastOwnerError, UserProfileError) as error:
+        return build_client_error_response(
+            request=request,
+            status_code=409,
+            code="admin_user_delete_not_allowed",
+            message=str(error),
+        )
 
 
 def _remove_file(path: Path) -> None:
@@ -427,10 +610,16 @@ def _log_validation_failure(
     "/api/v1/memoriais",
     response_model=GeneratedMemorialListResponse,
 )
-def list_persisted_memorials(request: Request, type: str | None = None):
+def list_persisted_memorials(
+    request: Request,
+    type: str | None = None,
+    current_user: CurrentUser = Depends(require_user),
+):
     if type is not None and type not in _SUPPORTED_MEMORIAL_LIST_TYPES:
         return _unsupported_memorial_type_response(type, request=request)
-    return GeneratedMemorialListResponse(memorials=list_generated_memorials(type))
+    return GeneratedMemorialListResponse(
+        memorials=list_generated_memorials(type)
+    )
 
 
 @router.get(
@@ -441,8 +630,12 @@ def get_persisted_memorial(
     memorial_id: str,
     request: Request,
     include_context: bool = False,
+    current_user: CurrentUser = Depends(require_user),
 ):
-    memorial = get_generated_memorial(memorial_id, include_context=include_context)
+    memorial = get_generated_memorial(
+        memorial_id,
+        include_context=include_context,
+    )
     if memorial is None:
         return build_client_error_response(
             request=request,
@@ -462,8 +655,11 @@ def correct_persisted_memorial(
     memorial_id: str,
     payload: MemorialCorrectionsPayload,
     request: Request,
+    current_user: CurrentUser = Depends(require_user),
 ):
-    record = get_generated_memorial_record(memorial_id)
+    record = get_generated_memorial_record(
+        memorial_id,
+    )
     if record is None:
         return build_client_error_response(
             request=request,
@@ -515,6 +711,8 @@ def correct_persisted_memorial(
         generated_context = getattr(pipeline_result, "context", corrected_context)
         return create_generated_memorial(
             memorial_type=memorial_type,
+            owner_user_id=current_user.user_id,
+            created_by_name=current_user.display_name,
             project_name=record.get("project_name") or _PROJECT_NAME_BY_TYPE[memorial_type],
             output_path=rendered_output_path,
             pdf_filenames=record.get("pdf_filenames") or [],
@@ -576,8 +774,15 @@ def correct_persisted_memorial(
     "/api/v1/memoriais/{memorial_id}/download",
     response_model=GeneratedMemorialDownloadResponse,
 )
-def get_persisted_memorial_download(memorial_id: str, request: Request):
-    record = get_generated_memorial_record(memorial_id)
+def get_persisted_memorial_download(
+    memorial_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(require_user),
+):
+    record = get_generated_memorial_record(
+        memorial_id,
+        owner_user_id=current_user.user_id,
+    )
     if record is None:
         return build_client_error_response(
             request=request,
@@ -625,9 +830,16 @@ def get_persisted_memorial_download(memorial_id: str, request: Request):
     "/api/v1/memoriais/{memorial_id}",
     status_code=204,
 )
-def delete_persisted_memorial(memorial_id: str, request: Request):
+def delete_persisted_memorial(
+    memorial_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(require_user),
+):
     try:
-        deleted = delete_generated_memorial(memorial_id)
+        deleted = delete_generated_memorial(
+            memorial_id,
+            owner_user_id=current_user.user_id,
+        )
     except GeneratedMemorialArtifactNotFoundError:
         return build_client_error_response(
             request=request,
@@ -672,6 +884,7 @@ async def create_persisted_memorial_from_files(
     request: Request,
     files: list[UploadFile] | None = File(default=None),
     observations: str | None = Form(default=None),
+    current_user: CurrentUser = Depends(require_user),
 ):
     if memorial_type not in _SUPPORTED_MEMORIAL_TYPES:
         return _unsupported_memorial_type_response(memorial_type, request=request)
@@ -695,6 +908,8 @@ async def create_persisted_memorial_from_files(
             )
         return create_generated_memorial(
             memorial_type=memorial_type,
+            owner_user_id=current_user.user_id,
+            created_by_name=current_user.display_name,
             project_name=_PROJECT_NAME_BY_TYPE[memorial_type],
             output_path=output_path,
             pdf_filenames=pdf_filenames,
@@ -771,7 +986,7 @@ async def create_persisted_memorial_from_files(
         _remove_file(output_path)
 
 
-@router.post("/api/v1/memoriais/eletrico")
+@router.post("/api/v1/memoriais/eletrico", dependencies=[Depends(require_user)])
 def create_memorial_eletrico(
     payload: dict[str, Any],
     request: Request,
@@ -804,7 +1019,7 @@ def create_memorial_eletrico(
     )
 
 
-@router.post("/api/v1/memoriais/telecom")
+@router.post("/api/v1/memoriais/telecom", dependencies=[Depends(require_user)])
 def create_memorial_telecom(
     payload: dict[str, Any],
     request: Request,
@@ -837,7 +1052,7 @@ def create_memorial_telecom(
     )
 
 
-@router.post("/api/v1/memoriais/gas-natural")
+@router.post("/api/v1/memoriais/gas-natural", dependencies=[Depends(require_user)])
 def create_memorial_gas_natural(
     payload: dict[str, Any],
     request: Request,
@@ -876,7 +1091,7 @@ def create_memorial_gas_natural(
     )
 
 
-@router.post("/api/v1/memoriais/glp")
+@router.post("/api/v1/memoriais/glp", dependencies=[Depends(require_user)])
 def create_memorial_glp(
     payload: dict[str, Any],
     request: Request,
@@ -916,6 +1131,7 @@ def create_memorial_glp(
 @router.post(
     "/api/v1/memoriais/eletrico/upload",
     response_model=FileIngestionResponse,
+    dependencies=[Depends(require_user)],
 )
 async def upload_memorial_eletrico_files(
     request: Request,
@@ -941,6 +1157,7 @@ async def upload_memorial_eletrico_files(
 @router.post(
     "/api/v1/memoriais/telecom/upload",
     response_model=FileIngestionResponse,
+    dependencies=[Depends(require_user)],
 )
 async def upload_memorial_telecom_files(
     request: Request,
@@ -966,6 +1183,7 @@ async def upload_memorial_telecom_files(
 @router.post(
     "/api/v1/memoriais/gas-natural/upload",
     response_model=FileIngestionResponse,
+    dependencies=[Depends(require_user)],
 )
 async def upload_memorial_gas_natural_files(
     request: Request,
@@ -989,7 +1207,7 @@ async def upload_memorial_gas_natural_files(
 
 
 def _process_review_session(
-    session_id: str, ingestion_result: FileIngestionResult
+    session_id: str, owner_user_id: str, ingestion_result: FileIngestionResult
 ) -> None:
     """Background task: extracts context from ingested files and updates session."""
     from dataclasses import asdict
@@ -998,6 +1216,7 @@ def _process_review_session(
         mapping, report = extract_mapping_from_ingested_files(ingestion_result.files)
         update_session(
             session_id,
+            owner_user_id,
             status=STATUS_PENDING_REVIEW,
             partial_context=mapping.context,
             extraction_report=asdict(report),
@@ -1014,12 +1233,12 @@ def _process_review_session(
             type(error).__name__,
             format_sanitized_exception_trace(error),
         )
-        update_session(session_id, status=STATUS_FAILED, error=str(error))
+        update_session(session_id, owner_user_id, status=STATUS_FAILED, error=str(error))
     finally:
         cleanup_ingestion_result(ingestion_result)
 
 
-@router.post("/api/v1/memoriais/eletrico/from-files")
+@router.post("/api/v1/memoriais/eletrico/from-files", dependencies=[Depends(require_user)])
 async def create_memorial_eletrico_from_files(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -1072,7 +1291,7 @@ async def create_memorial_eletrico_from_files(
     )
 
 
-@router.post("/api/v1/memoriais/telecom/from-files")
+@router.post("/api/v1/memoriais/telecom/from-files", dependencies=[Depends(require_user)])
 async def create_memorial_telecom_from_files(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -1123,7 +1342,7 @@ async def create_memorial_telecom_from_files(
     )
 
 
-@router.post("/api/v1/memoriais/gas-natural/from-files")
+@router.post("/api/v1/memoriais/gas-natural/from-files", dependencies=[Depends(require_user)])
 async def create_memorial_gas_natural_from_files(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -1185,6 +1404,7 @@ async def create_memorial_gas_natural_from_files(
 @router.post(
     "/api/v1/memoriais/glp/upload",
     response_model=FileIngestionResponse,
+    dependencies=[Depends(require_user)],
 )
 async def upload_memorial_glp_files(
     request: Request,
@@ -1207,7 +1427,7 @@ async def upload_memorial_glp_files(
     return _file_ingestion_response(result)
 
 
-@router.post("/api/v1/memoriais/glp/from-files")
+@router.post("/api/v1/memoriais/glp/from-files", dependencies=[Depends(require_user)])
 async def create_memorial_glp_from_files(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -1269,7 +1489,7 @@ def _glp_v2_route_guard(request: Request) -> JSONResponse | None:
     return None
 
 
-@router.post("/api/v1/memoriais/glp/v2/from-files")
+@router.post("/api/v1/memoriais/glp/v2/from-files", dependencies=[Depends(require_user)])
 async def create_memorial_glp_v2_from_files(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -1331,6 +1551,7 @@ async def create_persisted_memorial_glp_v2_from_files(
     request: Request,
     files: list[UploadFile] | None = File(default=None),
     observations: str | None = Form(default=None),
+    current_user: CurrentUser = Depends(require_user),
 ):
     blocked = _glp_v2_route_guard(request)
     if blocked is not None:
@@ -1353,6 +1574,8 @@ async def create_persisted_memorial_glp_v2_from_files(
         )
         return create_generated_memorial(
             memorial_type="glp_v2",
+            owner_user_id=current_user.user_id,
+            created_by_name=current_user.display_name,
             project_name="Memorial GLP v2",
             output_path=output_path,
             pdf_filenames=pdf_filenames,
@@ -1438,6 +1661,7 @@ async def create_review_session(
     request: Request,
     background_tasks: BackgroundTasks,
     files: list[UploadFile] | None = File(default=None),
+    current_user: CurrentUser = Depends(require_user),
 ):
     try:
         ingestion_result = await ingest_uploaded_files(files or [])
@@ -1451,9 +1675,14 @@ async def create_review_session(
 
     session_id: str | None = None
     try:
-        session_id = create_session()
+        session_id = create_session(current_user.user_id)
         logger.info("Review session created: session_id=%s", session_id)
-        background_tasks.add_task(_process_review_session, session_id, ingestion_result)
+        background_tasks.add_task(
+            _process_review_session,
+            session_id,
+            current_user.user_id,
+            ingestion_result,
+        )
     except Exception:
         cleanup_ingestion_result(ingestion_result)
         if session_id is not None:
@@ -1467,8 +1696,12 @@ async def create_review_session(
     "/api/v1/memoriais/eletrico/sessoes/{session_id}",
     response_model=SessionStateResponse,
 )
-def get_review_session(session_id: str, request: Request):
-    session = load_session(session_id)
+def get_review_session(
+    session_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(require_user),
+):
+    session = load_session(session_id, current_user.user_id)
     if session is None:
         return build_client_error_response(
             request=request,
@@ -1487,8 +1720,9 @@ def patch_review_session_context(
     session_id: str,
     payload: ContextCorrectionsPayload,
     request: Request,
+    current_user: CurrentUser = Depends(require_user),
 ):
-    session = load_session(session_id)
+    session = load_session(session_id, current_user.user_id)
     if session is None:
         return build_client_error_response(
             request=request,
@@ -1505,7 +1739,11 @@ def patch_review_session_context(
         )
 
     merged_corrections = merge_context(session.corrections, payload.corrections)
-    updated = update_session(session_id, corrections=merged_corrections)
+    updated = update_session(
+        session_id,
+        current_user.user_id,
+        corrections=merged_corrections,
+    )
     return SessionStateResponse(**updated.__dict__)
 
 
@@ -1514,8 +1752,9 @@ def generate_from_review_session(
     session_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
+    current_user: CurrentUser = Depends(require_user),
 ):
-    session = load_session(session_id)
+    session = load_session(session_id, current_user.user_id)
     if session is None:
         return build_client_error_response(
             request=request,
