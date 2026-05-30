@@ -1,0 +1,17 @@
+.DS_Store
+.codex
+.env
+.git
+.gitignore
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+htmlcov
+.coverage
+projects
+sessions

@@ -483,7 +483,8 @@ Variáveis suportadas pela aplicação:
 - `CORS_ALLOWED_ORIGINS`
 - `CORS_ORIGINS`
 - `SUPABASE_URL`
-- `SUPABASE_KEY`
+- `SUPABASE_SECRET_KEY` ou `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_KEY` (legado)
 - `GENERATED_MEMORIALS_BUCKET`
 - `GENERATED_MEMORIALS_SIGNED_URL_TTL`
 - `MAX_FILE_COUNT`
@@ -496,7 +497,7 @@ Comportamento por ambiente:
 
 - em `local` e `test`, a API aceita origins locais padrão se CORS não for informado
 - em `production`, `CORS_ALLOWED_ORIGINS` é obrigatório
-- em `production`, a persistência de memoriais exige `GENERATED_MEMORIALS_BUCKET`, `SUPABASE_URL` e `SUPABASE_KEY`
+- em `production`, a persistência de memoriais exige `GENERATED_MEMORIALS_BUCKET`, `SUPABASE_URL` e `SUPABASE_SECRET_KEY` ou `SUPABASE_SERVICE_ROLE_KEY`
 
 ## Supabase e persistência
 
@@ -513,7 +514,7 @@ Configuração recomendada:
 
 ```env
 SUPABASE_URL=...
-SUPABASE_KEY=...
+SUPABASE_SECRET_KEY=...
 GENERATED_MEMORIALS_BUCKET=generated-memorials
 GENERATED_MEMORIALS_SIGNED_URL_TTL=3600
 ```
@@ -523,6 +524,18 @@ Migrations relacionadas:
 - `migrations/002_generated_memorials.sql`
 - `migrations/003_create_storage_bucket.sql`
 - `migrations/004_generated_memorials_context.sql`
+- `migrations/005_auth_profiles_and_ownership.sql`
+
+### Auth e usuários
+
+O dashboard usa Supabase Auth com email/senha. Cadastro público deve ficar desabilitado no Supabase; usuários novos são criados apenas pela API em `/api/v1/admin/users`, acessível por perfis `owner`.
+
+Setup inicial:
+
+1. Crie o primeiro usuário em Supabase Authentication.
+2. Execute `migrations/005_auth_profiles_and_ownership.sql`.
+3. Confirme que o usuário `adc8635c-193a-4568-9896-2bc523bba923` foi inserido em `public.user_profiles` como `owner` durante o desenvolvimento.
+4. Antes da produção, crie/promova o usuário do engenheiro chefe para `owner` e demova ou desative o usuário temporário.
 
 Comportamento do ciclo de estados:
 
