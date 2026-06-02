@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import app.api.routes as routes
 from app.api.auth import CurrentUser
+from app.services.supabase_auth_admin import SupabaseAuthAdminError
 from app.services.user_profile_store import LastOwnerError, SelfManagementError, UserProfile
 
 
@@ -76,15 +77,44 @@ class AdminUsersApiTests(unittest.TestCase):
         body = json.loads(response.body.decode("utf-8"))
         self.assertEqual(body["error"]["code"], "admin_user_update_not_allowed")
 
-    @patch("app.api.routes.deactivate_profile_as_owner")
-    def test_owner_cannot_deactivate_self(self, deactivate_mock) -> None:
-        deactivate_mock.side_effect = SelfManagementError("O owner não pode remover o próprio acesso.")
+    @patch("app.api.routes.validate_profile_removal_as_owner")
+    def test_owner_cannot_remove_self(self, validate_mock) -> None:
+        validate_mock.side_effect = SelfManagementError("O owner não pode remover o próprio acesso.")
 
         response = routes.delete_admin_user("owner-123", _request(), current_user=_owner())
 
         self.assertEqual(response.status_code, 409)
         body = json.loads(response.body.decode("utf-8"))
         self.assertEqual(body["error"]["code"], "admin_user_delete_not_allowed")
+
+    @patch("app.api.routes.delete_auth_user")
+    @patch("app.api.routes.validate_profile_removal_as_owner")
+    def test_owner_removes_user_from_auth_after_profile_validation(
+        self, validate_mock, delete_auth_mock
+    ) -> None:
+        validate_mock.return_value = _profile("user-123")
+
+        response = routes.delete_admin_user("user-123", _request(), current_user=_owner())
+
+        self.assertEqual(response.user_id, "user-123")
+        validate_mock.assert_called_once_with("user-123", "owner-123")
+        delete_auth_mock.assert_called_once_with("user-123")
+
+    @patch("app.api.routes.delete_auth_user")
+    @patch("app.api.routes.validate_profile_removal_as_owner")
+    def test_owner_gets_safe_error_when_auth_delete_fails(
+        self, validate_mock, delete_auth_mock
+    ) -> None:
+        validate_mock.return_value = _profile("user-123")
+        delete_auth_mock.side_effect = SupabaseAuthAdminError(
+            "Falha ao excluir usuário no Supabase Auth."
+        )
+
+        response = routes.delete_admin_user("user-123", _request(), current_user=_owner())
+
+        self.assertEqual(response.status_code, 503)
+        body = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(body["error"]["code"], "admin_user_delete_failed")
 
 
 if __name__ == "__main__":
