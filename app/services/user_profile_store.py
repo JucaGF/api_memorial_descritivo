@@ -215,3 +215,18 @@ def deactivate_profile_as_owner(target_user_id: str, actor_user_id: str) -> User
         actor_user_id=actor_user_id,
         status=STATUS_INACTIVE,
     )
+
+
+def validate_profile_removal_as_owner(target_user_id: str, actor_user_id: str) -> UserProfile:
+    profile = get_profile(target_user_id)
+    if profile is None:
+        raise UserProfileNotFoundError("Usuário não encontrado.")
+    if target_user_id == actor_user_id:
+        raise SelfManagementError("O owner não pode remover o próprio acesso.")
+    if (
+        profile.role == ROLE_OWNER
+        and profile.status == STATUS_ACTIVE
+        and _active_owner_count() <= 1
+    ):
+        raise LastOwnerError("Não é possível remover o último owner ativo.")
+    return profile

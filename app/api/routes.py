@@ -102,10 +102,10 @@ from app.services.user_profile_store import (
     UserProfileError,
     UserProfileNotFoundError,
     create_profile,
-    deactivate_profile_as_owner,
     list_profiles,
     update_my_display_name,
     update_profile_as_owner,
+    validate_profile_removal_as_owner,
 )
 
 logger = logging.getLogger(__name__)
@@ -281,7 +281,8 @@ def delete_admin_user(
     current_user: CurrentUser = Depends(require_owner),
 ):
     try:
-        profile = deactivate_profile_as_owner(user_id, current_user.user_id)
+        profile = validate_profile_removal_as_owner(user_id, current_user.user_id)
+        delete_auth_user(user_id)
         return _profile_response(profile)
     except UserProfileNotFoundError:
         return build_client_error_response(
@@ -296,6 +297,13 @@ def delete_admin_user(
             status_code=409,
             code="admin_user_delete_not_allowed",
             message=str(error),
+        )
+    except SupabaseAuthAdminError as error:
+        return build_error_response(
+            status_code=503,
+            code="admin_user_delete_failed",
+            message=str(error),
+            request_id=get_request_id(request),
         )
 
 
