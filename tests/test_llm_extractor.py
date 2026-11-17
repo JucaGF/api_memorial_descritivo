@@ -1335,6 +1335,73 @@ class EletricoCanteiroLLMTests(unittest.TestCase):
         self.assertIs(merge_call["text_format"], EletricoCanteiroLLMExtraction)
         self.assertEqual(result["obra"]["nome"], "Bothanic")
 
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_canteiro_merge_failure_keeps_lists_with_local_fallback(
+        self, _model_mock, client_mock
+    ) -> None:
+        per_file = {
+            "a.pdf": EletricoCanteiroLLMExtraction(
+                obra=CanteiroObraExtraction(nome="Bothanic"),
+                equipamentos=[
+                    EquipamentoExtraction(nome="Betoneira", potencia="7,5 CV", qtd=1),
+                ],
+                quadros=[
+                    QuadroExtraction(nome="Q.G.B.T.", carga_w=89088),
+                    QuadroExtraction(nome="Q.D.L/T TORRE", carga_w=12714),
+                ],
+            ),
+            "b.pdf": EletricoCanteiroLLMExtraction(
+                obra=CanteiroObraExtraction(nome="Outro nome", localizacao="Cabo Branco"),
+                equipamentos=[
+                    EquipamentoExtraction(nome="Betoneira", potencia="7,5 CV", qtd=1),
+                    EquipamentoExtraction(nome="Policorte", potencia="3 CV", qtd=1),
+                ],
+                quadros=[
+                    QuadroExtraction(nome="Q.G.B.T", carga_w=89088),
+                    QuadroExtraction(nome="Q.D.STAND", carga_w=9170),
+                ],
+            ),
+        }
+
+        def parse_side_effect(**kwargs):
+            content = kwargs["input"][0]["content"]
+            if content[0]["text"].startswith(ELETRICO_CANTEIRO_MERGE_PROMPT):
+                raise RuntimeError("merge unavailable")
+            filename = "a.pdf" if "=== FILE: a.pdf ===" in content[1]["text"] else "b.pdf"
+            response = MagicMock()
+            response.output_parsed = per_file[filename]
+            return response
+
+        client = MagicMock()
+        client.responses.parse.side_effect = parse_side_effect
+        client_mock.return_value = client
+
+        files = [_source_file("a.pdf"), _source_file("b.pdf")]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_eletrico_canteiro_with_llm_result(files)
+
+        self.assertEqual(client.responses.parse.call_count, 3)
+        self.assertTrue(result.cross_validation["batch_merge_fallback_used"])
+        context = result.context
+        self.assertEqual(context["obra"]["nome"], "Bothanic")
+        self.assertEqual(context["obra"]["localizacao"], "Cabo Branco")
+        self.assertEqual(
+            [quadro["nome"] for quadro in context["quadros"]],
+            ["Q.G.B.T.", "Q.D.L/T TORRE", "Q.D.STAND"],
+        )
+        self.assertEqual(
+            context["equipamentos"],
+            [{"nome": "Betoneira", "potencia": "7,5 CV", "qtd": 1}],
+        )
+
+    def test_shared_first_non_null_merge_still_ignores_lists(self) -> None:
+        merged = _first_non_null_merge([
+            {"obra": {"nome": "A"}, "quadros": [{"nome": "Q.G.B.T.", "carga_w": 1}]},
+        ])
+
+        self.assertEqual(merged, {"obra": {"nome": "A"}})
+
 
 if __name__ == "__main__":
     unittest.main()

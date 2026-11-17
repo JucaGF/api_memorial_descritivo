@@ -434,6 +434,122 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(body["files"]), 1)
         self.assertEqual(body["files"][0]["extension"], ".pdf")
 
+    @patch(
+        "app.api.routes.generate_memorial_eletrico_canteiro_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_post_eletrico_canteiro_from_files_returns_docx(self, pipeline_mock) -> None:
+        async def pipeline_side_effect(_files, output_path: Path) -> PipelineResult:
+            document = Document()
+            document.add_paragraph("Memorial canteiro gerado a partir de arquivos.")
+            document.save(output_path)
+            return PipelineResult(context={"obra": {"nome": "BOTHANIC"}}, output_path=output_path)
+
+        pipeline_mock.side_effect = pipeline_side_effect
+        files = [("files", ("canteiro.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+
+        response = self.client.post(
+            "/api/v1/memoriais/eletrico-canteiro/from-files",
+            files=files,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertIn(
+            "memorial_eletrico_canteiro_v1.docx",
+            response.headers["content-disposition"],
+        )
+        self.assertTrue(response.content.startswith(b"PK"))
+        pipeline_mock.assert_awaited_once()
+
+    @patch(
+        "app.api.routes.generate_memorial_eletrico_canteiro_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_post_eletrico_canteiro_from_files_returns_400_with_canteiro_message(
+        self, pipeline_mock
+    ) -> None:
+        pipeline_mock.side_effect = MemorialValidationError(
+            [
+                ValidationIssue(
+                    path="$.equipamentos",
+                    message="[] should be non-empty",
+                    validator="minItems",
+                )
+            ],
+            extraction_report={"filled": [], "missing": [], "pending": ["equipamentos"]},
+        )
+        files = [("files", ("canteiro.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+
+        response = self.client.post(
+            "/api/v1/memoriais/eletrico-canteiro/from-files",
+            files=files,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["detail"], "Payload invalido para o memorial eletrico canteiro v1.")
+        self.assertEqual(body["errors"][0]["path"], "$.equipamentos")
+
+    @patch("app.api.routes.create_generated_memorial")
+    @patch(
+        "app.api.routes.generate_memorial_eletrico_canteiro_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_post_eletrico_canteiro_from_files_persist_creates_record(
+        self,
+        pipeline_mock,
+        create_mock,
+    ) -> None:
+        from app.schemas.generated_memorial import GeneratedMemorialResponse
+
+        async def pipeline_side_effect(_files, output_path: Path) -> PipelineResult:
+            document = Document()
+            document.add_paragraph("Memorial canteiro.")
+            document.save(output_path)
+            return PipelineResult(
+                context={"obra": {"nome": "BOTHANIC"}},
+                output_path=output_path,
+                extraction_report=ExtractionReport(
+                    filled=["quadros"], missing=[], pending=["mt.secao_cabo_mm2"]
+                ),
+            )
+
+        now = datetime.now(tz=timezone.utc)
+        pipeline_mock.side_effect = pipeline_side_effect
+        create_mock.return_value = GeneratedMemorialResponse(
+            id="canteiro-1",
+            type="eletrico-canteiro",
+            project_name="Memorial Elétrico Canteiro de Obras",
+            status="ready",
+            pdf_filenames=["canteiro.pdf"],
+            created_at=now,
+            updated_at=now,
+            download_url="https://signed.example/download",
+        )
+        files = [("files", ("canteiro.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+
+        response = self.client.post(
+            "/api/v1/memoriais/eletrico-canteiro/from-files/persist",
+            files=files,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["type"], "eletrico-canteiro")
+        pipeline_mock.assert_awaited_once()
+        create_kwargs = create_mock.call_args.kwargs
+        self.assertEqual(create_kwargs["memorial_type"], "eletrico-canteiro")
+        self.assertEqual(create_kwargs["project_name"], "Memorial Elétrico Canteiro de Obras")
+        self.assertEqual(create_kwargs["context_version"], "eletrico_canteiro_v1")
+        self.assertEqual(create_kwargs["template_version"], "eletrico_canteiro_v1")
+        self.assertEqual(create_kwargs["pdf_filenames"], ["canteiro.pdf"])
+        self.assertEqual(
+            create_kwargs["extraction_report"]["pending"], ["mt.secao_cabo_mm2"]
+        )
+
     def test_post_memorial_gas_natural_upload_returns_metadata_for_valid_files(self) -> None:
         files = [
             ("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf")),

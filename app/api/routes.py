@@ -74,6 +74,7 @@ from app.services.pipeline import (
 )
 from app.services.pipeline_from_files import (
     extract_mapping_from_ingested_files,
+    generate_memorial_eletrico_canteiro_v1_from_uploaded_files,
     generate_memorial_gas_natural_v1_from_uploaded_files,
     generate_memorial_glp_v1_from_uploaded_files,
     generate_memorial_glp_v2_from_uploaded_files,
@@ -422,6 +423,10 @@ async def _generate_memorial_from_uploaded_files(
 ):
     if memorial_type == "eletrico":
         return await generate_memorial_eletrico_v1_from_uploaded_files(files, output_path)
+    if memorial_type == "eletrico-canteiro":
+        return await generate_memorial_eletrico_canteiro_v1_from_uploaded_files(
+            files, output_path
+        )
     if memorial_type == "telecom":
         return await generate_memorial_telecom_v1_from_uploaded_files(files, output_path)
     if memorial_type == "gas-natural":
@@ -1376,6 +1381,64 @@ async def create_memorial_eletrico_from_files(
 
     return _docx_file_response(
         output_path, background_tasks, "memorial_eletrico_v1.docx"
+    )
+
+
+@router.post(
+    "/api/v1/memoriais/eletrico-canteiro/from-files",
+    dependencies=[Depends(require_user)],
+)
+async def create_memorial_eletrico_canteiro_from_files(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] | None = File(default=None),
+):
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        await generate_memorial_eletrico_canteiro_v1_from_uploaded_files(
+            files or [], output_path
+        )
+    except MemorialValidationError as error:
+        _remove_file(output_path)
+        return _validation_error_response(
+            error,
+            "Payload invalido para o memorial eletrico canteiro v1.",
+            request=request,
+        )
+    except (FileIngestionError, ProjectExtractionError) as error:
+        _remove_file(output_path)
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
+        )
+    except MemorialRenderError as error:
+        _remove_file(output_path)
+        logger.error(
+            "Memorial render from files failed method=%s path=%s request_id=%s memorial_type=eletrico-canteiro error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_internal_server_error_response(request)
+
+    return _docx_file_response(
+        output_path, background_tasks, "memorial_eletrico_canteiro_v1.docx"
     )
 
 

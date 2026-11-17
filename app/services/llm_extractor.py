@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import unicodedata
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -50,6 +51,8 @@ class ExtractionStrategy:
     text_format: type[BaseModel]
     single_file_extractor: Any
     batch_merger: Any
+    # Fallback deterministico quando o merge LLM do lote falha. None = _first_non_null_merge.
+    merge_fallback: Any = None
 
 
 # ── Extraction schema ─────────────────────────────────────────────────────────
@@ -1558,7 +1561,8 @@ def _extract_batch(
             )
             merge_fallback_used = True
             merge_error_type = type(exc).__name__
-            merged_payload = _first_non_null_merge(
+            merge_fallback = strategy.merge_fallback or _first_non_null_merge
+            merged_payload = merge_fallback(
                 [result.payload for result in per_file_results if result.payload]
             )
 
@@ -1866,6 +1870,42 @@ def _first_non_null_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
+def _quadro_name_key(nome: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(nome or ""))
+    text = text.encode("ascii", "ignore").decode("ascii").upper()
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def _eletrico_canteiro_fallback_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fallback do canteiro quando o merge LLM falha: preserva as listas.
+
+    Secoes dict: primeiro valor nao nulo (igual a _first_non_null_merge).
+    quadros: uniao entre arquivos, deduplicada pelo nome normalizado (a
+    primeira ocorrencia vence, ordem preservada) -- as pranchas repetem os
+    mesmos diagramas. equipamentos: primeira lista nao vazia, sem somar
+    quantidades entre arquivos.
+    """
+    merged = _first_non_null_merge(partials)
+
+    quadros: list[Any] = []
+    seen: set[str] = set()
+    for partial in partials:
+        for quadro in partial.get("quadros") or []:
+            key = _quadro_name_key(quadro.get("nome")) if isinstance(quadro, dict) else ""
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            quadros.append(quadro)
+    merged["quadros"] = quadros
+
+    merged["equipamentos"] = next(
+        (list(partial["equipamentos"]) for partial in partials if partial.get("equipamentos")),
+        [],
+    )
+    return merged
+
+
 ELETRICO_STRATEGY = ExtractionStrategy(
     name="Eletrico",
     cross_validation_intro=(
@@ -1889,6 +1929,7 @@ ELETRICO_CANTEIRO_STRATEGY = ExtractionStrategy(
     text_format=EletricoCanteiroLLMExtraction,
     single_file_extractor=_extract_eletrico_canteiro_single_file,
     batch_merger=_merge_eletrico_canteiro_with_llm,
+    merge_fallback=_eletrico_canteiro_fallback_merge,
 )
 
 TELECOM_STRATEGY = ExtractionStrategy(

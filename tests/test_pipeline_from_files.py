@@ -26,6 +26,9 @@ from app.services.pipeline_from_files import (
     extract_glp_mapping_from_ingested_files,
     extract_gas_natural_mapping_from_ingested_files,
     extract_telecom_mapping_from_ingested_files,
+    extract_eletrico_canteiro_mapping_from_ingested_files,
+    generate_memorial_eletrico_canteiro_v1_from_ingested_files,
+    generate_memorial_eletrico_canteiro_v1_from_uploaded_files,
     generate_memorial_eletrico_v1_from_ingested_files,
     generate_memorial_gas_natural_v1_from_ingested_files,
     generate_memorial_gas_natural_v1_from_uploaded_files,
@@ -2302,6 +2305,218 @@ class GlpV2AssemblyTests(unittest.TestCase):
             mapping.context["obra"]["tipologia"],
             "Subsolo, térreo, 8 pavimentos",
         )
+
+
+CANTEIRO_FIXTURE_TEXT = (
+    ROOT / "tests" / "fixtures" / "canteiro_bothanic_planta_text.txt"
+).read_text(encoding="utf-8")
+
+
+def build_canteiro_extraction_result() -> ProjectExtractionResult:
+    return ProjectExtractionResult(
+        raw_text=CANTEIRO_FIXTURE_TEXT,
+        source_files=[],
+        signals={"total_files": 1},
+    )
+
+
+def build_canteiro_llm_context(**overrides) -> dict:
+    context = {
+        "obra": {
+            "construtora": None,
+            "nome": "BOTHANIC",
+            "localizacao": "Cabo Branco, João Pessoa - PB",
+            "numero_cadastro": None,
+        },
+        "energia": {
+            "tem_subestacao": None,
+            "tipo_subestacao": None,
+            "potencia_transformador_kva": None,
+            "tap_descricao": None,
+            "tensao_secundaria": None,
+        },
+        "mt": {
+            "tensao_kv": None,
+            "diametro_eletroduto_pol": None,
+            "tipo_cabo": None,
+            "temperatura_cabo": None,
+            "classe_isolacao": None,
+            "secao_cabo_mm2": None,
+        },
+        "aterramento": {"qtd_hastes": None, "secao_cabo_cobre_mm2": None},
+        "equipamentos": [
+            {"nome": "Betoneira", "potencia": "7,5 CV", "qtd": 1},
+            {"nome": "Mini guincho", "potencia": None, "qtd": 1},
+        ],
+        "quadros": [
+            {"nome": "Q.G.B.T.", "carga_w": 50000},
+            {"nome": "Q.D.OBRA", "carga_w": 10000},
+        ],
+    }
+    context.update(overrides)
+    return context
+
+
+class EletricoCanteiroFromFilesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.output_dir = Path(mkdtemp(prefix="canteiro_from_files_test_"))
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_from_files_mapper_only_fails_with_equipamentos_issue(
+        self,
+        extract_files_mock,
+        llm_mock,
+    ) -> None:
+        extract_files_mock.return_value = build_canteiro_extraction_result()
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
+            with self.assertRaises(MemorialValidationError) as captured:
+                generate_memorial_eletrico_canteiro_v1_from_ingested_files(
+                    [build_ingested_file()],
+                    self.output_dir / "canteiro.docx",
+                )
+
+        llm_mock.assert_not_called()
+        error = captured.exception
+        self.assertIn("$.equipamentos", [issue.path for issue in error.issues])
+        self.assertIsNotNone(error.extraction_report)
+        self.assertIn("equipamentos", error.extraction_report["pending"])
+        self.assertIn("quadros", error.extraction_report["filled"])
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_from_files_llm_quadros_win_over_mapper(
+        self,
+        extract_files_mock,
+        llm_mock,
+    ) -> None:
+        extract_files_mock.return_value = build_canteiro_extraction_result()
+        llm_mock.return_value = LLMExtractionRunResult(context=build_canteiro_llm_context())
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            mapping, _ = extract_eletrico_canteiro_mapping_from_ingested_files(
+                [build_ingested_file()]
+            )
+
+        self.assertEqual(
+            mapping.context["quadros"],
+            [
+                {"nome": "Q.G.B.T.", "carga_w": 50000},
+                {"nome": "Q.D.OBRA", "carga_w": 10000},
+            ],
+        )
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_from_files_mapper_quadros_fill_when_llm_empty(
+        self,
+        extract_files_mock,
+        llm_mock,
+    ) -> None:
+        extract_files_mock.return_value = build_canteiro_extraction_result()
+        llm_mock.return_value = LLMExtractionRunResult(
+            context=build_canteiro_llm_context(quadros=[])
+        )
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            mapping, report = extract_eletrico_canteiro_mapping_from_ingested_files(
+                [build_ingested_file()]
+            )
+
+        self.assertEqual(len(mapping.context["quadros"]), 6)
+        self.assertEqual(mapping.context["quadros"][0], {"nome": "Q.G.B.T.", "carga_w": 89088})
+        self.assertIn("quadros", report.filled)
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_from_files_mapper_fills_only_null_scalar_fields(
+        self,
+        extract_files_mock,
+        llm_mock,
+    ) -> None:
+        extract_files_mock.return_value = build_canteiro_extraction_result()
+        llm_context = build_canteiro_llm_context()
+        llm_context["aterramento"] = {"qtd_hastes": 5, "secao_cabo_cobre_mm2": None}
+        llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            mapping, _ = extract_eletrico_canteiro_mapping_from_ingested_files(
+                [build_ingested_file()]
+            )
+
+        self.assertEqual(mapping.context["obra"]["nome"], "BOTHANIC")
+        self.assertEqual(mapping.context["obra"]["construtora"], "MOREIRA & RUFFO'S LTDA")
+        self.assertEqual(mapping.context["aterramento"]["qtd_hastes"], 5)
+        self.assertEqual(mapping.context["aterramento"]["secao_cabo_cobre_mm2"], 50)
+        self.assertIs(mapping.context["energia"]["tem_subestacao"], True)
+        self.assertEqual(
+            [item["nome"] for item in mapping.context["equipamentos"]],
+            ["Betoneira", "Mini guincho"],
+        )
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_from_files_generates_docx_without_mt_and_reports_mt_pending(
+        self,
+        extract_files_mock,
+        llm_mock,
+    ) -> None:
+        extract_files_mock.return_value = build_canteiro_extraction_result()
+        llm_mock.return_value = LLMExtractionRunResult(
+            context=build_canteiro_llm_context(quadros=[]),
+            cross_validation={"fallback_used": False},
+        )
+        output_path = self.output_dir / "canteiro_from_files.docx"
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = generate_memorial_eletrico_canteiro_v1_from_ingested_files(
+                [build_ingested_file()],
+                output_path,
+            )
+
+        self.assertTrue(result.output_path.exists())
+        self.assertEqual(result.context["mt"]["tensao_kv"], 13.8)
+        self.assertIsNone(result.context["mt"]["secao_cabo_mm2"])
+        self.assertIsNone(result.context["mt"]["diametro_eletroduto_pol"])
+        self.assertIn("mt.secao_cabo_mm2", result.extraction_report.pending)
+        self.assertIn("mt.diametro_eletroduto_pol", result.extraction_report.pending)
+        self.assertEqual(result.extraction_report.cross_validation, {"fallback_used": False})
+        self.assertEqual(len(result.context["quadros"]), 6)
+
+
+class EletricoCanteiroFromUploadedFilesTests(unittest.IsolatedAsyncioTestCase):
+    @patch("app.services.pipeline_from_files.cleanup_ingestion_result")
+    @patch("app.services.pipeline_from_files.generate_memorial_eletrico_canteiro_v1_from_ingested_files")
+    @patch("app.services.pipeline_from_files.ingest_uploaded_files", new_callable=AsyncMock)
+    async def test_calls_ingestion_and_canteiro_pipeline_and_cleans_up(
+        self, ingest_mock, pipeline_mock, cleanup_mock
+    ) -> None:
+        upload_files = [
+            UploadFile(
+                filename="canteiro.pdf",
+                file=io.BytesIO(b"%PDF-1.4 teste"),
+                headers={"content-type": "application/pdf"},
+            )
+        ]
+        ingested_files = [build_ingested_file()]
+        ingestion_result = FileIngestionResult(
+            request_dir="/tmp/eletrico_canteiro_v1_upload_123",
+            files=ingested_files,
+        )
+        output_path = ROOT / "tests" / "output" / "pipeline_from_uploaded_files_canteiro.docx"
+        expected_result = PipelineResult(context={"obra": {}}, output_path=output_path)
+        ingest_mock.return_value = ingestion_result
+        pipeline_mock.return_value = expected_result
+
+        result = await generate_memorial_eletrico_canteiro_v1_from_uploaded_files(
+            upload_files, output_path
+        )
+
+        self.assertEqual(result, expected_result)
+        ingest_mock.assert_awaited_once_with(upload_files)
+        pipeline_mock.assert_called_once_with(ingested_files, output_path)
+        cleanup_mock.assert_called_once_with(ingestion_result)
 
 
 if __name__ == "__main__":

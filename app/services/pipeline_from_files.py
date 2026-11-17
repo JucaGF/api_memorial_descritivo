@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -12,12 +13,14 @@ from app.services.diameter_normalizer import normalize_diameter
 from app.services.extraction_mapper import (
     ExtractionReport,
     MappingResult,
+    assess_eletrico_canteiro_extraction_coverage,
     assess_extraction_coverage,
     assess_gas_natural_extraction_coverage,
     assess_glp_extraction_coverage,
     assess_glp_v2_extraction_coverage,
     assess_telecom_extraction_coverage,
     map_extraction_to_partial_context,
+    map_extraction_to_partial_eletrico_canteiro_context,
     map_extraction_to_partial_gas_natural_context,
     map_extraction_to_partial_glp_context,
     map_extraction_to_partial_glp_v2_context,
@@ -30,6 +33,7 @@ from app.services.file_ingestion import (
     ingest_uploaded_files,
 )
 from app.services.llm_extractor import (
+    extract_eletrico_canteiro_with_llm_result,
     extract_gas_natural_with_llm_result,
     extract_glp_v2_with_llm_result,
     extract_glp_with_llm_result,
@@ -40,6 +44,7 @@ from app.services.llm_extractor import (
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import (
     PipelineResult,
+    generate_memorial_eletrico_canteiro_v1,
     generate_memorial_eletrico_v1,
     generate_memorial_gas_natural_v1,
     generate_memorial_glp_v1,
@@ -861,6 +866,77 @@ def extract_telecom_mapping_from_ingested_files(
     return mapping, report
 
 
+_CANTEIRO_LIST_SECTIONS = ("quadros", "equipamentos")
+
+
+def _merge_canteiro_llm_with_mapper(
+    llm_context: dict[str, Any],
+    mapper_context: dict[str, Any],
+) -> dict[str, Any]:
+    """LLM e a fonte principal; o mapper preenche so os campos None.
+
+    quadros e equipamentos sao valor unico: a lista do mapper so entra quando a
+    da LLM vier vazia ou ausente (nunca uniao entre as duas).
+    """
+    gap_fills = _fill_gaps(llm_context, mapper_context)
+    if gap_fills:
+        gap_count = sum(len(s) for s in gap_fills.values() if isinstance(s, dict))
+        logger.info("Eletrico canteiro mapper supplemented %d additional fields", gap_count)
+        final_context = merge_context(llm_context, gap_fills)
+    else:
+        final_context = deepcopy(llm_context)
+
+    for list_key in _CANTEIRO_LIST_SECTIONS:
+        if final_context.get(list_key):
+            continue
+        mapper_list = mapper_context.get(list_key)
+        if mapper_list:
+            logger.info("Eletrico canteiro mapper supplied %s (%d items)", list_key, len(mapper_list))
+            final_context[list_key] = deepcopy(mapper_list)
+        else:
+            # Lista vazia = nao encontrada: fora do contexto para o relatorio
+            # nao conta-la como preenchida.
+            final_context.pop(list_key, None)
+    return final_context
+
+
+def extract_eletrico_canteiro_mapping_from_ingested_files(
+    files: list[IngestedFileMetadata],
+) -> tuple[MappingResult, ExtractionReport]:
+    extraction_result = extract_project_files(files)
+    mapper_mapping = map_extraction_to_partial_eletrico_canteiro_context(extraction_result)
+    cross_validation: dict[str, Any] | None = None
+
+    if is_llm_extraction_enabled():
+        llm_result = extract_eletrico_canteiro_with_llm_result(extraction_result.source_files)
+        llm_fields = sum(
+            1 for section in llm_result.context.values()
+            if isinstance(section, dict)
+            for v in section.values()
+            if v is not None
+        )
+        logger.info(
+            "Eletrico canteiro LLM primary extracted %d fields from %d files",
+            llm_fields,
+            len(files),
+        )
+        final_context = _merge_canteiro_llm_with_mapper(
+            llm_result.context, mapper_mapping.context
+        )
+        cross_validation = llm_result.cross_validation
+    else:
+        final_context = _merge_canteiro_llm_with_mapper({}, mapper_mapping.context)
+
+    mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
+    report = assess_eletrico_canteiro_extraction_coverage(mapping)
+    report = _attach_cross_validation_report(report, cross_validation)
+    logger.info(
+        "Eletrico canteiro extraction coverage: filled=%d, missing=%d, pending=%d",
+        len(report.filled), len(report.missing), len(report.pending),
+    )
+    return mapping, report
+
+
 def extract_gas_natural_mapping_from_ingested_files(
     files: list[IngestedFileMetadata],
 ) -> tuple[MappingResult, ExtractionReport]:
@@ -979,6 +1055,45 @@ async def generate_memorial_eletrico_v1_from_uploaded_files(
     ingestion_result = await ingest_uploaded_files(files)
     try:
         return generate_memorial_eletrico_v1_from_ingested_files(
+            ingestion_result.files,
+            output_path,
+        )
+    finally:
+        cleanup_ingestion_result(ingestion_result)
+
+
+def generate_memorial_eletrico_canteiro_v1_from_ingested_files(
+    files: list[IngestedFileMetadata],
+    output_path: Path,
+) -> PipelineResult:
+    mapping, report = extract_eletrico_canteiro_mapping_from_ingested_files(files)
+
+    payload = deepcopy(mapping.context)
+    # Lista nao encontrada vira [] para a validacao apontar $.<lista> (minItems).
+    for list_key in _CANTEIRO_LIST_SECTIONS:
+        payload.setdefault(list_key, [])
+
+    try:
+        result = generate_memorial_eletrico_canteiro_v1(payload, output_path)
+        return PipelineResult(
+            context=result.context,
+            output_path=result.output_path,
+            extraction_report=report,
+        )
+    except MemorialValidationError as error:
+        raise MemorialValidationError(
+            issues=error.issues,
+            extraction_report=asdict(report),
+        ) from error
+
+
+async def generate_memorial_eletrico_canteiro_v1_from_uploaded_files(
+    files: list[UploadedFile],
+    output_path: Path,
+) -> PipelineResult:
+    ingestion_result = await ingest_uploaded_files(files)
+    try:
+        return generate_memorial_eletrico_canteiro_v1_from_ingested_files(
             ingestion_result.files,
             output_path,
         )
