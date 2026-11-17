@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import unicodedata
 from copy import deepcopy
@@ -8,7 +9,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from app.services.context_builder import build_memorial_glp_v2_context, merge_context
+from app.services.context_builder import (
+    build_memorial_glp_v2_context,
+    merge_context,
+    normalize_quadro_key,
+)
 from app.services.diameter_normalizer import normalize_diameter
 from app.services.extraction_mapper import (
     ExtractionReport,
@@ -867,6 +872,82 @@ def extract_telecom_mapping_from_ingested_files(
 
 
 _CANTEIRO_LIST_SECTIONS = ("quadros", "equipamentos")
+_CANTEIRO_ADJUSTMENTS_KEY = "canteiro_list_adjustments"
+
+
+def _is_positive_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _has_nome(item: Any) -> bool:
+    return isinstance(item, dict) and isinstance(item.get("nome"), str) and bool(item["nome"].strip())
+
+
+def _clean_canteiro_llm_lists(
+    llm_context: dict[str, Any],
+    mapper_context: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Saneia os itens de lista da LLM antes da regra "LLM vence o mapper".
+
+    Um item malformado nao pode derrubar o memorial inteiro: item sem nome sai;
+    quadro sem carga valida pega a carga do quadro homonimo do mapper ou sai;
+    equipamento sem qtd valida vira qtd 1 (um simbolo = uma unidade).
+    """
+    context = deepcopy(llm_context)
+    adjustments: list[dict[str, Any]] = []
+
+    mapper_cargas: dict[str, Any] = {}
+    for quadro in mapper_context.get("quadros") or []:
+        if _has_nome(quadro) and _is_positive_number(quadro.get("carga_w")):
+            mapper_cargas.setdefault(normalize_quadro_key(quadro["nome"]), quadro["carga_w"])
+
+    if isinstance(context.get("quadros"), list):
+        quadros: list[dict[str, Any]] = []
+        for index, quadro in enumerate(context["quadros"]):
+            if not _has_nome(quadro):
+                adjustments.append(
+                    {"lista": "quadros", "indice": index, "acao": "descartado", "motivo": "nome ausente"}
+                )
+                continue
+            if not _is_positive_number(quadro.get("carga_w")):
+                mapper_carga = mapper_cargas.get(normalize_quadro_key(quadro["nome"]))
+                if mapper_carga is None:
+                    adjustments.append(
+                        {"lista": "quadros", "nome": quadro["nome"], "acao": "descartado", "motivo": "carga_w ausente"}
+                    )
+                    continue
+                quadro = {**quadro, "carga_w": mapper_carga}
+                adjustments.append(
+                    {"lista": "quadros", "nome": quadro["nome"], "acao": "carga_do_mapper", "valor": mapper_carga}
+                )
+            quadros.append(quadro)
+        context["quadros"] = quadros
+
+    if isinstance(context.get("equipamentos"), list):
+        equipamentos: list[dict[str, Any]] = []
+        for index, equipamento in enumerate(context["equipamentos"]):
+            if not _has_nome(equipamento):
+                adjustments.append(
+                    {"lista": "equipamentos", "indice": index, "acao": "descartado", "motivo": "nome ausente"}
+                )
+                continue
+            qtd = equipamento.get("qtd")
+            if isinstance(qtd, bool) or not isinstance(qtd, int) or qtd < 1:
+                equipamento = {**equipamento, "qtd": 1}
+                adjustments.append(
+                    {"lista": "equipamentos", "nome": equipamento["nome"], "acao": "qtd_padrao", "valor": 1}
+                )
+            equipamentos.append(equipamento)
+        context["equipamentos"] = equipamentos
+
+    if adjustments:
+        logger.info("Eletrico canteiro LLM list items adjusted: %d", len(adjustments))
+    return context, adjustments
 
 
 def _merge_canteiro_llm_with_mapper(
@@ -876,7 +957,8 @@ def _merge_canteiro_llm_with_mapper(
     """LLM e a fonte principal; o mapper preenche so os campos None.
 
     quadros e equipamentos sao valor unico: a lista do mapper so entra quando a
-    da LLM vier vazia ou ausente (nunca uniao entre as duas).
+    da LLM vier vazia ou ausente (nunca uniao entre as duas). Os itens da LLM
+    ja devem chegar saneados (_clean_canteiro_llm_lists).
     """
     gap_fills = _fill_gaps(llm_context, mapper_context)
     if gap_fills:
@@ -920,10 +1002,18 @@ def extract_eletrico_canteiro_mapping_from_ingested_files(
             llm_fields,
             len(files),
         )
-        final_context = _merge_canteiro_llm_with_mapper(
+        llm_context, adjustments = _clean_canteiro_llm_lists(
             llm_result.context, mapper_mapping.context
         )
+        final_context = _merge_canteiro_llm_with_mapper(llm_context, mapper_mapping.context)
         cross_validation = llm_result.cross_validation
+        if adjustments:
+            # ExtractionReport nao tem campo de avisos; cross_validation ja carrega
+            # anotacoes extras (ex.: quantitative_*), entao os ajustes vao para la.
+            cross_validation = {
+                **(cross_validation or {}),
+                _CANTEIRO_ADJUSTMENTS_KEY: adjustments,
+            }
     else:
         final_context = _merge_canteiro_llm_with_mapper({}, mapper_mapping.context)
 

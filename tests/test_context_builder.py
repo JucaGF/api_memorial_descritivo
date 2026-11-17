@@ -12,6 +12,7 @@ from app.services.context_builder import (
     build_memorial_gas_natural_v1_context,
     build_memorial_telecom_v1_context,
     merge_context,
+    normalize_quadro_key,
 )
 
 
@@ -268,6 +269,11 @@ class CanteiroContextBuilderTests(unittest.TestCase):
             {"quadros": [{"nome": "Q.G.B.T.", "carga_w": 1, "descricao": "custom"}]}
         )
         self.assertEqual(ctx["quadros"][0]["descricao"], "custom")
+
+    def test_normalize_quadro_key_ignores_punctuation_spaces_case_and_accents(self) -> None:
+        self.assertEqual(normalize_quadro_key("Q.G.B.T."), normalize_quadro_key("q.g.b.t"))
+        self.assertEqual(normalize_quadro_key("Q.D. MÓVEL"), "QDMOVEL")
+        self.assertEqual(normalize_quadro_key(None), "")
 
 
 if __name__ == "__main__":

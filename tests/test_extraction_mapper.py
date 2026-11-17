@@ -705,6 +705,17 @@ class EletricoCanteiroMapperTests(unittest.TestCase):
             self.assertNotIn(path, report.filled)
         self.assertEqual(report.missing, [])
 
+    def test_canteiro_mapper_dedupes_quadros_by_normalized_name(self) -> None:
+        ctx = map_extraction_to_partial_eletrico_canteiro_context(
+            build_extraction_result(
+                "Q.D.APOIO= 33.837 W\nDIAGRAMA\nQ.D. APOIO = 33.837 W\nQ.D.STAND= 9.170 W"
+            )
+        ).context
+        self.assertEqual(
+            [q["nome"] for q in ctx["quadros"]],
+            ["Q.D.APOIO", "Q.D.STAND"],
+        )
+
     def test_canteiro_mapper_without_canteiro_data_returns_no_quadros(self) -> None:
         ctx = map_extraction_to_partial_eletrico_canteiro_context(
             build_extraction_result("Texto sem dados de canteiro.")

@@ -110,7 +110,7 @@ def build_memorial_eletrico_v1_context(input_payload: dict[str, Any]) -> dict[st
     return context
 
 
-def _normalize_quadro_key(nome: Any) -> str:
+def normalize_quadro_key(nome: Any) -> str:
     text = unicodedata.normalize("NFKD", str(nome or ""))
     text = text.encode("ascii", "ignore").decode("ascii").upper()
     return "".join(ch for ch in text if ch.isalnum())
@@ -158,7 +158,7 @@ def build_memorial_eletrico_canteiro_v1_context(
                 quadro["carga_formatada"] = carga_formatada
             if quadro.get("descricao") is None:
                 quadro["descricao"] = QUADRO_DESCRICOES_CONHECIDAS.get(
-                    _normalize_quadro_key(quadro.get("nome"))
+                    normalize_quadro_key(quadro.get("nome"))
                 )
 
     return context

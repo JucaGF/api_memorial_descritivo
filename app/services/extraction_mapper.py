@@ -5,6 +5,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services.context_builder import normalize_quadro_key
 from app.services.diameter_normalizer import normalize_diameter
 from app.services.project_extractor import ProjectExtractionResult
 
@@ -1443,7 +1444,7 @@ def _extract_canteiro_quadros(text: str) -> FieldExtraction | None:
     evidences: list[str] = []
     for match in _CANTEIRO_QUADRO_RE.finditer(text):
         nome = match.group(1).strip()
-        key = nome.upper()
+        key = normalize_quadro_key(nome)
         if key in seen:
             continue
         seen.add(key)

@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import time
-import unicodedata
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.services.context_builder import normalize_quadro_key
 from app.services.project_extractor import ExtractedSourceFile
 
 logger = logging.getLogger(__name__)
@@ -1870,12 +1870,6 @@ def _first_non_null_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def _quadro_name_key(nome: Any) -> str:
-    text = unicodedata.normalize("NFKD", str(nome or ""))
-    text = text.encode("ascii", "ignore").decode("ascii").upper()
-    return "".join(ch for ch in text if ch.isalnum())
-
-
 def _eletrico_canteiro_fallback_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
     """Fallback do canteiro quando o merge LLM falha: preserva as listas.
 
@@ -1891,7 +1885,7 @@ def _eletrico_canteiro_fallback_merge(partials: list[dict[str, Any]]) -> dict[st
     seen: set[str] = set()
     for partial in partials:
         for quadro in partial.get("quadros") or []:
-            key = _quadro_name_key(quadro.get("nome")) if isinstance(quadro, dict) else ""
+            key = normalize_quadro_key(quadro.get("nome")) if isinstance(quadro, dict) else ""
             if key and key in seen:
                 continue
             if key:
