@@ -1369,6 +1369,157 @@ def map_extraction_to_partial_glp_context(
     return MappingResult(context=context, evidence=evidence)
 
 
+# ── Eletrico canteiro v1 ──────────────────────────────────────────────────────
+
+CANTEIRO_EXTRACTABLE_BY_MAPPER = [
+    "obra.construtora",
+    "obra.numero_cadastro",
+    "energia.tem_subestacao",
+    "energia.tipo_subestacao",
+    "energia.potencia_transformador_kva",
+    "aterramento.qtd_hastes",
+    "aterramento.secao_cabo_cobre_mm2",
+    "quadros",
+]
+
+# Ficam a cargo da LLM. MT eletroduto/cabo variam por obra e nao tem default.
+CANTEIRO_PENDING_EXTRACTION = [
+    "obra.nome",
+    "obra.localizacao",
+    "equipamentos",
+    "mt.diametro_eletroduto_pol",
+    "mt.secao_cabo_mm2",
+]
+
+_CANTEIRO_SE_RE = re.compile(r"SE\s+A[ÉE]REA\s+(\d+(?:[.,]\d+)?)\s*KVA", re.IGNORECASE)
+_CANTEIRO_HASTES_RE = re.compile(r"M[ÍI]NIMA:\s*(\d+)\s+HASTES", re.IGNORECASE)
+_CANTEIRO_CABO_MALHA_RE = re.compile(r"#\s*(\d+)\s*mm².{0,40}aterramento", re.IGNORECASE)
+_CANTEIRO_QUADRO_RE = re.compile(
+    r"(Q\.G\.B\.T\.|Q\.D\.\s*[A-ZÀ-Ú/][A-ZÀ-Ú/ .]*?)\s*=\s*"
+    r"(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*W"
+)
+
+
+def _extract_canteiro_subestacao_kva(text: str) -> FieldExtraction | None:
+    match = _CANTEIRO_SE_RE.search(text)
+    if not match:
+        return None
+    value = float(match.group(1).replace(",", "."))
+    return FieldExtraction(
+        value=int(value) if value.is_integer() else value,
+        evidence=match.group(0),
+        rule="canteiro_se_aerea_kva",
+        confidence="high",
+    )
+
+
+def _extract_canteiro_qtd_hastes(text: str) -> FieldExtraction | None:
+    match = _CANTEIRO_HASTES_RE.search(text)
+    if not match:
+        return None
+    return FieldExtraction(
+        value=int(match.group(1)),
+        evidence=match.group(0),
+        rule="canteiro_terra_minima_hastes",
+        confidence="high",
+    )
+
+
+def _extract_canteiro_cabo_malha(text: str) -> FieldExtraction | None:
+    match = _CANTEIRO_CABO_MALHA_RE.search(text)
+    if not match:
+        return None
+    return FieldExtraction(
+        value=int(match.group(1)),
+        evidence=match.group(0),
+        rule="canteiro_cabo_malha_aterramento",
+        confidence="high",
+    )
+
+
+def _extract_canteiro_quadros(text: str) -> FieldExtraction | None:
+    quadros: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    evidences: list[str] = []
+    for match in _CANTEIRO_QUADRO_RE.finditer(text):
+        nome = match.group(1).strip()
+        key = nome.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        carga = int(match.group(2).replace(".", "").split(",")[0])
+        quadros.append({"nome": nome, "carga_w": carga})
+        evidences.append(match.group(0))
+    if not quadros:
+        return None
+    return FieldExtraction(
+        value=quadros,
+        evidence="; ".join(evidences),
+        rule="canteiro_quadros_regex",
+        confidence="high",
+    )
+
+
+def assess_eletrico_canteiro_extraction_coverage(mapping: MappingResult) -> ExtractionReport:
+    filled = []
+    missing = []
+    for field_path in CANTEIRO_EXTRACTABLE_BY_MAPPER:
+        if _get_nested_value(mapping.context, field_path) is not None:
+            filled.append(field_path)
+        else:
+            missing.append(field_path)
+
+    pending = []
+    for field_path in CANTEIRO_PENDING_EXTRACTION:
+        if _get_nested_value(mapping.context, field_path) is not None:
+            filled.append(field_path)
+        else:
+            pending.append(field_path)
+
+    return ExtractionReport(
+        filled=filled,
+        missing=missing,
+        pending=pending,
+        evidence=mapping.evidence,
+    )
+
+
+def map_extraction_to_partial_eletrico_canteiro_context(
+    extraction_result: ProjectExtractionResult,
+) -> MappingResult:
+    """Mapper deterministico do canteiro.
+
+    Nao extrai aterramento.tipo_sistema (a legenda traz "TT") nem qualquer
+    dado de MT: o alimentador de BT 3X1X50+25mm2 nao e cabo de MT.
+    """
+    raw_text = extraction_result.raw_text
+    text = _normalize_text(raw_text)
+
+    context: dict[str, Any] = {}
+    evidence: dict[str, FieldExtraction] = {}
+
+    def add(path: str, extraction: FieldExtraction | None) -> None:
+        _add_field(context, evidence, path, extraction)
+
+    add("obra.construtora", _extract_construtora(raw_text))
+    add("obra.numero_cadastro", _extract_numero_cadastro(raw_text))
+
+    kva = _extract_canteiro_subestacao_kva(text)
+    if kva is not None:
+        add("energia.tem_subestacao", FieldExtraction(True, kva.rule, kva.evidence, "high"))
+        add(
+            "energia.tipo_subestacao",
+            FieldExtraction("subestação aérea abaixadora", kva.rule, kva.evidence, "high"),
+        )
+        add("energia.potencia_transformador_kva", kva)
+
+    add("aterramento.qtd_hastes", _extract_canteiro_qtd_hastes(text))
+    add("aterramento.secao_cabo_cobre_mm2", _extract_canteiro_cabo_malha(text))
+    add("quadros", _extract_canteiro_quadros(text))
+
+    return MappingResult(context=context, evidence=evidence)
+
+
 def _glp_v2_main_pipe_windows(raw_text: str) -> list[str]:
     windows: list[str] = []
     for pattern in (
