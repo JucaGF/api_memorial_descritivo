@@ -656,9 +656,13 @@ and the project/process number -> numero_cadastro.
 
 ### energia (substation)
 - Look for the label "SE AÉREA nnKVA" (pole-mounted aerial substation), for example "SE AÉREA 75KVA".
-- tem_subestacao: true when such a substation is drawn; tipo_subestacao: "aérea" for "SE AÉREA"; \
-potencia_transformador_kva: the number from the label (75).
-- tap_descricao and tensao_secundaria: only if the drawing explicitly states them; otherwise null.
+- tem_subestacao: true when such a substation is drawn; false when no substation/transformer is drawn \
+(the site is fed directly by the utility network).
+- tipo_subestacao: the full description used in the memorial sentence "através de uma <tipo_subestacao> \
+alimentada", e.g. "subestação aérea abaixadora" for "SE AÉREA". Never return just "aérea".
+- potencia_transformador_kva: the number from the label (75).
+- Do NOT extract tap_descricao or tensao_secundaria: they are fixed values of the memorial; return null \
+for both.
 
 ### mt (medium voltage)
 - Fill eletroduto/cable fields ONLY when the drawing explicitly labels them as MEDIUM VOLTAGE \
@@ -711,6 +715,9 @@ Your task: produce a SINGLE unified extraction for the canteiro electrical memor
 
 Rules:
 - obra comes from the title block; prefer the most complete value.
+- energia: tem_subestacao is true if ANY file has true (the substation is drawn on only one sheet but \
+serves the whole site); false only when every file says false. Take tipo_subestacao and \
+potencia_transformador_kva from the file that shows the substation.
 - quadros: deduplicate by panel name. The same diagram repeated across sheets is ONE panel, not several. \
 When the same panel has different carga_w, prefer the value from the sheet with the diagram itself.
 - equipamentos: the same physical machine shown on several sheets is counted once; do not add \
@@ -1873,13 +1880,23 @@ def _first_non_null_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
 def _eletrico_canteiro_fallback_merge(partials: list[dict[str, Any]]) -> dict[str, Any]:
     """Fallback do canteiro quando o merge LLM falha: preserva as listas.
 
-    Secoes dict: primeiro valor nao nulo (igual a _first_non_null_merge).
+    Secoes dict: primeiro valor nao nulo (igual a _first_non_null_merge),
+    exceto energia.tem_subestacao, que e true se qualquer prancha a tiver.
     quadros: uniao entre arquivos, deduplicada pelo nome normalizado (a
     primeira ocorrencia vence, ordem preservada) -- as pranchas repetem os
     mesmos diagramas. equipamentos: primeira lista nao vazia, sem somar
     quantidades entre arquivos.
     """
     merged = _first_non_null_merge(partials)
+
+    # Uma prancha sem a SE devolve tem_subestacao=false; a SE desenhada em
+    # qualquer prancha vale para o canteiro inteiro.
+    if any(
+        isinstance(partial.get("energia"), dict)
+        and partial["energia"].get("tem_subestacao") is True
+        for partial in partials
+    ):
+        merged.setdefault("energia", {})["tem_subestacao"] = True
 
     quadros: list[Any] = []
     seen: set[str] = set()

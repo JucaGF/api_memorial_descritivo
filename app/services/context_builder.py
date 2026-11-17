@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date
+import math
 import unicodedata
 from typing import Any
 
@@ -122,6 +123,45 @@ def _format_carga_w(carga_w: Any) -> str | None:
     return f"{int(round(carga_w)):,} W".replace(",", ".")
 
 
+# Campos numericos do canteiro que a LLM devolve como float (75.0) e o template
+# imprime crus: valor inteiro vira int para nao sair "75.0 kVA" no documento.
+# mt.tensao_kv fica de fora (13.8).
+CANTEIRO_INTEGRAL_NUMBER_FIELDS: tuple[tuple[str, str], ...] = (
+    ("energia", "potencia_transformador_kva"),
+    ("aterramento", "secao_cabo_cobre_mm2"),
+    ("mt", "diametro_eletroduto_pol"),
+    ("mt", "secao_cabo_mm2"),
+    ("mt", "temperatura_cabo"),
+)
+# Fixos para todo canteiro com subestacao (decisao 7): sobrescrevem o extraido.
+CANTEIRO_FIXED_SUBESTACAO_KEYS = ("tap_descricao", "tensao_secundaria")
+
+
+def _ascii_fold(text: str) -> str:
+    folded = unicodedata.normalize("NFKD", text)
+    return folded.encode("ascii", "ignore").decode("ascii").casefold()
+
+
+def _normalize_canteiro_tipo_subestacao(value: Any) -> Any:
+    """O template diz "através de uma {{ tipo_subestacao }} alimentada": um
+    valor curto como "aérea" vira "subestação aérea abaixadora"."""
+    if not isinstance(value, str) or not value.strip():
+        return value
+    text = " ".join(value.split())
+    folded = _ascii_fold(text)
+    if "subestacao" in folded:
+        return text
+    if "abaixadora" in folded:
+        return f"subestação {text}"
+    return f"subestação {text} abaixadora"
+
+
+def _integral_float_to_int(value: Any) -> Any:
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return value
+
+
 def build_memorial_eletrico_canteiro_v1_context(
     input_payload: dict[str, Any],
 ) -> dict[str, Any]:
@@ -134,6 +174,10 @@ def build_memorial_eletrico_canteiro_v1_context(
     obra = _ensure_dict(context, "obra")
     obra.setdefault("porcentagem_entre_trafos", PORCENTAGEM_ENTRE_TRAFOS)
     obra.setdefault("porcentagem_entre_quadros", PORCENTAGEM_ENTRE_QUADROS)
+    localizacao = obra.get("localizacao")
+    if isinstance(localizacao, str):
+        # O template ja fecha a frase: "Localização: {{ obra.localizacao }}."
+        obra["localizacao"] = localizacao.strip().rstrip(".").rstrip()
     context["obra"] = obra
 
     for section_name, defaults in CANTEIRO_DEFAULTS.items():
@@ -147,6 +191,17 @@ def build_memorial_eletrico_canteiro_v1_context(
     if energia.get("tem_subestacao") is False:
         for field_name in NULLABLE_ENERGIA_KEYS:
             energia[field_name] = None
+    elif energia.get("tem_subestacao") is True:
+        for key in CANTEIRO_FIXED_SUBESTACAO_KEYS:
+            energia[key] = deepcopy(CANTEIRO_DEFAULTS["energia"][key])
+        energia["tipo_subestacao"] = _normalize_canteiro_tipo_subestacao(
+            energia.get("tipo_subestacao")
+        )
+
+    for section_name, key in CANTEIRO_INTEGRAL_NUMBER_FIELDS:
+        section = context.get(section_name)
+        if isinstance(section, dict) and key in section:
+            section[key] = _integral_float_to_int(section[key])
 
     quadros = context.get("quadros")
     if isinstance(quadros, list):

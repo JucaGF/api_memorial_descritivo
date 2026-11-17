@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 from pathlib import Path
 from tempfile import mkdtemp
 import unittest
@@ -14,7 +15,8 @@ from app.services.extraction_mapper import ExtractionReport, MappingResult
 from app.services.file_ingestion import FileIngestionResult, IngestedFileMetadata
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import PipelineResult
-from app.services.llm_extractor import LLMExtractionRunResult
+from app.services.llm_extractor import EletricoCanteiroLLMExtraction, LLMExtractionRunResult
+from app.services.memorial_renderer import inspect_docx_text
 from app.services.pipeline_from_files import (
     _assemble_glp_v2_payload,
     _build_extraction_report_payload,
@@ -2635,6 +2637,243 @@ class EletricoCanteiroFromFilesTests(unittest.TestCase):
         self.assertEqual(
             result.context["equipamentos"],
             [{"nome": "Betoneira", "potencia": "7,5 CV", "qtd": 1}],
+        )
+
+
+def build_realistic_canteiro_llm_context(**overrides) -> dict:
+    """Saida da LLM como chega em producao: passa pelo modelo Pydantic e
+    model_dump(mode="json") (numeros como float, tipo_subestacao curto)."""
+    raw = {
+        "obra": {
+            "construtora": "MOREIRA & RUFFO'S LTDA",
+            "nome": "BOTHANIC",
+            "localizacao": "R. Manuel Cavalcanti de Souza, Cabo Branco, João Pessoa - PB.",
+            "numero_cadastro": "01/02",
+        },
+        "energia": {
+            "tem_subestacao": True,
+            "tipo_subestacao": "aérea",
+            "potencia_transformador_kva": 75,
+        },
+        "mt": {},
+        "aterramento": {"qtd_hastes": 3, "secao_cabo_cobre_mm2": 50},
+        "equipamentos": [
+            {"nome": "Betoneira", "potencia": "7,5 CV", "qtd": 1},
+            {"nome": "Mini guincho", "potencia": None, "qtd": 1},
+        ],
+        "quadros": [
+            {"nome": "Q.G.B.T.", "carga_w": 89088},
+            {"nome": "Q.D. APOIO", "carga_w": 33837.5},
+        ],
+        "observacoes": "x",
+    }
+    for key, value in overrides.items():
+        raw[key] = value
+    context = EletricoCanteiroLLMExtraction.model_validate(raw).model_dump(mode="json")
+    context.pop("observacoes", None)
+    return context
+
+
+CANTEIRO_FIXTURE_TEXT_WITHOUT_SE = re.sub(
+    r"SE\s+A[ÉE]REA\s+\d+\s*KVA", "", CANTEIRO_FIXTURE_TEXT, flags=re.IGNORECASE
+)
+
+
+class EletricoCanteiroRealisticLLMOutputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.output_dir = Path(mkdtemp(prefix="canteiro_realistic_llm_test_"))
+
+    def _generate(self, extract_files_mock, llm_mock, llm_context, raw_text=None):
+        extract_files_mock.return_value = ProjectExtractionResult(
+            raw_text=raw_text if raw_text is not None else CANTEIRO_FIXTURE_TEXT,
+            source_files=[],
+            signals={"total_files": 1},
+        )
+        llm_mock.return_value = LLMExtractionRunResult(context=llm_context)
+        output_path = self.output_dir / "canteiro.docx"
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = generate_memorial_eletrico_canteiro_v1_from_ingested_files(
+                [build_ingested_file()], output_path
+            )
+        return result, inspect_docx_text(result.output_path)
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_realistic_llm_output_renders_full_substation_phrase(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        _, text = self._generate(
+            extract_files_mock, llm_mock, build_realistic_canteiro_llm_context()
+        )
+
+        self.assertIn("através de uma subestação aérea abaixadora alimentada", text)
+        self.assertNotIn("uma aérea", text)
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_realistic_llm_output_renders_integral_numbers_without_decimal(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        llm_context = build_realistic_canteiro_llm_context()
+        self.assertEqual(llm_context["energia"]["potencia_transformador_kva"], 75.0)
+        self.assertIsInstance(llm_context["energia"]["potencia_transformador_kva"], float)
+
+        _, text = self._generate(extract_files_mock, llm_mock, llm_context)
+
+        self.assertIn("75 kVA", text)
+        self.assertIn("50 mm²", text)
+        self.assertNotIn(".0 kVA", text)
+        self.assertNotIn(".0 mm²", text)
+        self.assertNotIn("None", text)
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_realistic_llm_output_has_no_double_period_after_localizacao(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        _, text = self._generate(
+            extract_files_mock, llm_mock, build_realistic_canteiro_llm_context()
+        )
+
+        self.assertIn("João Pessoa - PB.", text)
+        self.assertNotIn("PB..", text)
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_mapper_numero_cadastro_wins_over_llm(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        result, text = self._generate(
+            extract_files_mock, llm_mock, build_realistic_canteiro_llm_context()
+        )
+
+        self.assertEqual(result.context["obra"]["numero_cadastro"], "46/2024")
+        self.assertIn("MEMORIAL 46/2024", text)
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_llm_numero_cadastro_kept_without_mapper_regex_match(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        # Sem nnn/aaaa no texto o mapper cai no fallback por rotulo e traz
+        # "INDICADAS" (confianca media): nao pode sobrescrever a LLM.
+        raw_text = re.sub(r"\b\d{2,6}/\d{4}\b", "", CANTEIRO_FIXTURE_TEXT)
+        result, _ = self._generate(
+            extract_files_mock,
+            llm_mock,
+            build_realistic_canteiro_llm_context(),
+            raw_text=raw_text,
+        )
+
+        self.assertEqual(result.context["obra"]["numero_cadastro"], "01/02")
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_fixed_taps_and_secondary_overwrite_llm_values(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        llm_context = build_realistic_canteiro_llm_context(
+            energia={
+                "tem_subestacao": True,
+                "tipo_subestacao": "aérea",
+                "potencia_transformador_kva": 75,
+                "tap_descricao": "tap nominal",
+                "tensao_secundaria": "220/127V",
+            }
+        )
+        result, text = self._generate(extract_files_mock, llm_mock, llm_context)
+
+        self.assertTrue(result.context["energia"]["tap_descricao"].startswith("Tap 1 – 13.800 V;"))
+        self.assertIn("Secundário: 380 V entre fases e 220 V entre fases e neutro.", text)
+        self.assertNotIn("220/127V", text)
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_without_se_defaults_tem_subestacao_false_and_generates(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        llm_context = build_realistic_canteiro_llm_context(
+            energia={"tem_subestacao": None}
+        )
+        result, text = self._generate(
+            extract_files_mock,
+            llm_mock,
+            llm_context,
+            raw_text=CANTEIRO_FIXTURE_TEXT_WITHOUT_SE,
+        )
+
+        self.assertIs(result.context["energia"]["tem_subestacao"], False)
+        self.assertIn("não sendo prevista subestação", text)
+        self.assertNotIn("None", text)
+        adjustments = result.extraction_report.cross_validation["canteiro_list_adjustments"]
+        self.assertIn(
+            {
+                "campo": "energia.tem_subestacao",
+                "acao": "padrao_false",
+                "motivo": "subestação não identificada pela LLM nem pelo mapper",
+            },
+            adjustments,
+        )
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_llm_false_and_no_mapper_se_generates_without_section(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        llm_context = build_realistic_canteiro_llm_context(
+            energia={"tem_subestacao": False}
+        )
+        result, text = self._generate(
+            extract_files_mock,
+            llm_mock,
+            llm_context,
+            raw_text=CANTEIRO_FIXTURE_TEXT_WITHOUT_SE,
+        )
+
+        self.assertIs(result.context["energia"]["tem_subestacao"], False)
+        self.assertIn("não sendo prevista subestação", text)
+        self.assertNotIn("transformador trifásico", text)
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_mapper_detected_se_beats_llm_false(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        llm_context = build_realistic_canteiro_llm_context(
+            energia={"tem_subestacao": False}
+        )
+        result, text = self._generate(extract_files_mock, llm_mock, llm_context)
+
+        self.assertIs(result.context["energia"]["tem_subestacao"], True)
+        self.assertEqual(result.context["energia"]["potencia_transformador_kva"], 75)
+        self.assertIn("uma subestação aérea abaixadora alimentada", text)
+        adjustments = result.extraction_report.cross_validation["canteiro_list_adjustments"]
+        self.assertIn(
+            {
+                "campo": "energia.tem_subestacao",
+                "acao": "subestacao_do_mapper",
+                "motivo": "mapper identificou a subestação na planta",
+            },
+            adjustments,
+        )
+
+    @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
+    @patch("app.services.pipeline_from_files.extract_project_files")
+    def test_canteiro_null_tem_subestacao_takes_mapper_se_when_detected(
+        self, extract_files_mock, llm_mock
+    ) -> None:
+        llm_context = build_realistic_canteiro_llm_context(
+            energia={"tem_subestacao": None}
+        )
+        result, text = self._generate(extract_files_mock, llm_mock, llm_context)
+
+        self.assertIs(result.context["energia"]["tem_subestacao"], True)
+        self.assertIn("uma subestação aérea abaixadora alimentada", text)
+        adjustments = (result.extraction_report.cross_validation or {}).get(
+            "canteiro_list_adjustments", []
+        )
+        self.assertFalse(
+            [item for item in adjustments if item.get("campo") == "energia.tem_subestacao"]
         )
 
 

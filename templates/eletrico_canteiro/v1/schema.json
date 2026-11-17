@@ -51,6 +51,10 @@
             "required": ["tem_subestacao"]
           },
           "then": {
+            "properties": {
+              "tipo_subestacao": {"type": "string", "minLength": 1},
+              "potencia_transformador_kva": {"type": "number", "exclusiveMinimum": 0}
+            },
             "required": [
               "tipo_subestacao",
               "potencia_transformador_kva",

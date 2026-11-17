@@ -982,6 +982,54 @@ def _merge_canteiro_llm_with_mapper(
     return final_context
 
 
+def _apply_canteiro_mapper_authority(
+    context: dict[str, Any],
+    mapper_mapping: MappingResult,
+) -> list[dict[str, Any]]:
+    """Regras do canteiro aplicadas depois do merge LLM + mapper (in place).
+
+    - obra.numero_cadastro: o do mapper vence o da LLM, que pode pegar o numero
+      da prancha ("01/02") -- so quando veio da regex nnn/aaaa (confianca alta);
+      o fallback por rotulo do mapper pode trazer lixo ("INDICADAS").
+    - energia.tem_subestacao: a SE detectada pelo mapper ("SE AEREA nnKVA")
+      vence um false da LLM; sem SE da LLM nem do mapper, vira false (canteiro
+      alimentado direto pela rede, secao 4.2 fora do documento).
+    """
+    adjustments: list[dict[str, Any]] = []
+    mapper_context = mapper_mapping.context
+
+    mapper_numero = mapper_mapping.evidence.get("obra.numero_cadastro")
+    if (
+        mapper_numero is not None
+        and mapper_numero.confidence == "high"
+        and isinstance(mapper_numero.value, str)
+        and mapper_numero.value.strip()
+    ):
+        context.setdefault("obra", {})["numero_cadastro"] = mapper_numero.value
+
+    energia = context.setdefault("energia", {})
+    mapper_has_se = (mapper_context.get("energia") or {}).get("tem_subestacao") is True
+    if mapper_has_se and energia.get("tem_subestacao") is not True:
+        energia["tem_subestacao"] = True
+        adjustments.append(
+            {
+                "campo": "energia.tem_subestacao",
+                "acao": "subestacao_do_mapper",
+                "motivo": "mapper identificou a subestação na planta",
+            }
+        )
+    elif energia.get("tem_subestacao") is None:
+        energia["tem_subestacao"] = False
+        adjustments.append(
+            {
+                "campo": "energia.tem_subestacao",
+                "acao": "padrao_false",
+                "motivo": "subestação não identificada pela LLM nem pelo mapper",
+            }
+        )
+    return adjustments
+
+
 def extract_eletrico_canteiro_mapping_from_ingested_files(
     files: list[IngestedFileMetadata],
 ) -> tuple[MappingResult, ExtractionReport]:
@@ -1006,6 +1054,7 @@ def extract_eletrico_canteiro_mapping_from_ingested_files(
             llm_result.context, mapper_mapping.context
         )
         final_context = _merge_canteiro_llm_with_mapper(llm_context, mapper_mapping.context)
+        adjustments += _apply_canteiro_mapper_authority(final_context, mapper_mapping)
         cross_validation = llm_result.cross_validation
         if adjustments:
             # ExtractionReport nao tem campo de avisos; cross_validation ja carrega

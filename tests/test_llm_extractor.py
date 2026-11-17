@@ -1263,6 +1263,41 @@ class EletricoCanteiroLLMTests(unittest.TestCase):
         self.assertIn("one unit per symbol", p)
         self.assertTrue(ELETRICO_CANTEIRO_MERGE_PROMPT.rstrip().endswith("Per-file extractions:"))
 
+    def test_canteiro_prompt_asks_full_substation_phrase_and_false_without_se(self) -> None:
+        p = ELETRICO_CANTEIRO_EXTRACTION_PROMPT
+        self.assertIn('"subestação aérea abaixadora"', p)
+        self.assertNotIn('tipo_subestacao: "aérea"', p)
+        self.assertIn("false when no substation", p)
+
+    def test_canteiro_prompt_does_not_ask_for_fixed_taps_or_secondary(self) -> None:
+        p = ELETRICO_CANTEIRO_EXTRACTION_PROMPT
+        self.assertNotIn("only if the drawing explicitly states them", p)
+        self.assertIn("Do NOT extract tap_descricao or tensao_secundaria", p)
+
+    def test_canteiro_merge_prompt_keeps_substation_seen_on_any_sheet(self) -> None:
+        self.assertIn("tem_subestacao is true if ANY file", ELETRICO_CANTEIRO_MERGE_PROMPT)
+
+    def test_canteiro_fallback_merge_keeps_substation_seen_on_any_sheet(self) -> None:
+        from app.services.llm_extractor import _eletrico_canteiro_fallback_merge
+
+        sheet_without_se = EletricoCanteiroLLMExtraction(
+            energia=EnergiaExtraction(tem_subestacao=False)
+        ).model_dump(mode="json")
+        sheet_with_se = EletricoCanteiroLLMExtraction(
+            energia=EnergiaExtraction(
+                tem_subestacao=True,
+                tipo_subestacao="subestação aérea abaixadora",
+                potencia_transformador_kva=75,
+            )
+        ).model_dump(mode="json")
+
+        merged = _eletrico_canteiro_fallback_merge([sheet_without_se, sheet_with_se])
+        self.assertIs(merged["energia"]["tem_subestacao"], True)
+        self.assertEqual(merged["energia"]["potencia_transformador_kva"], 75)
+
+        merged = _eletrico_canteiro_fallback_merge([sheet_without_se, sheet_without_se])
+        self.assertIs(merged["energia"]["tem_subestacao"], False)
+
     def test_canteiro_strategy_wiring(self) -> None:
         self.assertIs(ELETRICO_CANTEIRO_STRATEGY.text_format, EletricoCanteiroLLMExtraction)
 

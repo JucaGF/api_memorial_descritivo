@@ -424,6 +424,50 @@ class ApiTests(unittest.TestCase):
         )
         self.assertTrue(body["errors"])
 
+    def test_post_memorial_eletrico_canteiro_returns_400_for_null_substation_fields(self) -> None:
+        payload = load_fixture("eletrico_canteiro_bothanic_expected.json")
+        payload["energia"] = {
+            "tem_subestacao": True,
+            "tipo_subestacao": None,
+            "potencia_transformador_kva": None,
+        }
+
+        response = self.client.post("/api/v1/memoriais/eletrico-canteiro", json=payload)
+
+        self.assertEqual(response.status_code, 400)
+        paths = {error["path"] for error in response.json()["errors"]}
+        self.assertIn("$.energia.tipo_subestacao", paths)
+        self.assertIn("$.energia.potencia_transformador_kva", paths)
+
+    @patch(
+        "app.api.routes.generate_memorial_eletrico_canteiro_v1_from_uploaded_files",
+        new_callable=AsyncMock,
+    )
+    def test_post_eletrico_canteiro_from_files_logs_validation_failure(
+        self, pipeline_mock
+    ) -> None:
+        pipeline_mock.side_effect = MemorialValidationError(
+            [ValidationIssue(path="$.equipamentos", message="x", validator="minItems")],
+            extraction_report={"filled": [], "missing": [], "pending": ["equipamentos"]},
+        )
+        files = [("files", ("canteiro.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+
+        with self.assertLogs("app.api.routes", level="WARNING") as logs:
+            response = self.client.post(
+                "/api/v1/memoriais/eletrico-canteiro/from-files",
+                files=files,
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(
+            any(
+                "Memorial render from files validation failed" in line
+                and "memorial_type=eletrico-canteiro" in line
+                for line in logs.output
+            ),
+            logs.output,
+        )
+
     def test_post_memorial_eletrico_canteiro_upload_returns_metadata_for_valid_files(self) -> None:
         files = [("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf"))]
 

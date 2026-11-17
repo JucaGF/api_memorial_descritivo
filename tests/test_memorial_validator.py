@@ -397,6 +397,32 @@ class MemorialValidatorTests(unittest.TestCase):
                 build_memorial_eletrico_canteiro_v1_context(payload)
             )
 
+    def test_validate_eletrico_canteiro_rejects_null_substation_fields_when_present(self) -> None:
+        payload = load_bothanic_fixture()
+        payload["energia"] = {
+            "tem_subestacao": True,
+            "tipo_subestacao": None,
+            "potencia_transformador_kva": None,
+        }
+        with self.assertRaises(MemorialValidationError) as ctx:
+            validate_memorial_eletrico_canteiro_v1_context(
+                build_memorial_eletrico_canteiro_v1_context(payload)
+            )
+        paths = {issue.path for issue in ctx.exception.issues}
+        self.assertIn("$.energia.tipo_subestacao", paths)
+        self.assertIn("$.energia.potencia_transformador_kva", paths)
+
+    def test_validate_eletrico_canteiro_rejects_empty_or_zero_substation_fields(self) -> None:
+        payload = load_bothanic_fixture()
+        payload["energia"].update({"tipo_subestacao": "", "potencia_transformador_kva": 0})
+        with self.assertRaises(MemorialValidationError) as ctx:
+            validate_memorial_eletrico_canteiro_v1_context(
+                build_memorial_eletrico_canteiro_v1_context(payload)
+            )
+        paths = {issue.path for issue in ctx.exception.issues}
+        self.assertIn("$.energia.tipo_subestacao", paths)
+        self.assertIn("$.energia.potencia_transformador_kva", paths)
+
     def test_validate_eletrico_canteiro_accepts_equipment_without_potencia(self) -> None:
         context = build_memorial_eletrico_canteiro_v1_context(load_bothanic_fixture())
         self.assertIsNone(context["equipamentos"][5]["potencia"])

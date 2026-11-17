@@ -1402,6 +1402,12 @@ async def create_memorial_eletrico_canteiro_from_files(
         )
     except MemorialValidationError as error:
         _remove_file(output_path)
+        _log_validation_failure(
+            request,
+            "eletrico-canteiro",
+            error,
+            "Memorial render from files validation failed",
+        )
         return _validation_error_response(
             error,
             "Payload invalido para o memorial eletrico canteiro v1.",
