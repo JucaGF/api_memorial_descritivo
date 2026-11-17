@@ -1383,13 +1383,13 @@ CANTEIRO_EXTRACTABLE_BY_MAPPER = [
     "quadros",
 ]
 
-# Ficam a cargo da LLM. MT eletroduto/cabo variam por obra e nao tem default.
+# Ficam a cargo da LLM. MT eletroduto/cabo (variam por obra, sem default) ficam de
+# fora: vazios sao o caso normal (sem MT rotulado o paragrafo sai do texto), entao
+# nao devem aparecer como "faltando" no painel de revisao.
 CANTEIRO_PENDING_EXTRACTION = [
     "obra.nome",
     "obra.localizacao",
     "equipamentos",
-    "mt.diametro_eletroduto_pol",
-    "mt.secao_cabo_mm2",
 ]
 
 _CANTEIRO_SE_RE = re.compile(r"SE\s+A[ÉE]REA\s+(\d+(?:[.,]\d+)?)\s*KVA", re.IGNORECASE)
