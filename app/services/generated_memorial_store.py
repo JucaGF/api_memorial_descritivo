@@ -20,6 +20,7 @@ STATUS_FAILED = "failed"
 
 _FILENAME_BY_TYPE = {
     "eletrico": "memorial_eletrico_v1.docx",
+    "eletrico-canteiro": "memorial_eletrico_canteiro_v1.docx",
     "telecom": "memorial_telecom_v1.docx",
     "gas-natural": "memorial_gas_natural_v1.docx",
     "glp": "memorial_glp_v1.docx",

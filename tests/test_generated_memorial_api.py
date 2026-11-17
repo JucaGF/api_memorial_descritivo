@@ -278,6 +278,74 @@ class GeneratedMemorialApiTests(unittest.TestCase):
         self.assertEqual(response.memorials[0].type, "glp_v2")
         list_mock.assert_called_once_with("glp_v2")
 
+    @patch("app.api.routes.list_generated_memorials")
+    def test_list_memorials_accepts_type_eletrico_canteiro(self, list_mock) -> None:
+        list_mock.return_value = [_memorial(memorial_type="eletrico-canteiro")]
+
+        response = routes.list_persisted_memorials(
+            _request(), type="eletrico-canteiro", current_user=_current_user()
+        )
+
+        self.assertEqual(len(response.memorials), 1)
+        self.assertEqual(response.memorials[0].type, "eletrico-canteiro")
+        list_mock.assert_called_once_with("eletrico-canteiro")
+
+    @patch("app.api.routes.create_generated_memorial")
+    @patch("app.api.routes.generate_memorial_eletrico_canteiro_v1")
+    @patch("app.api.routes.get_generated_memorial_record")
+    def test_correct_persisted_eletrico_canteiro_memorial_rerenders(
+        self,
+        get_record_mock,
+        generate_mock,
+        create_mock,
+    ) -> None:
+        from app.services.pipeline import PipelineResult
+
+        now = datetime.now(tz=timezone.utc).isoformat()
+        get_record_mock.return_value = {
+            "id": "old-123",
+            "type": "eletrico-canteiro",
+            "project_name": "Memorial Elétrico Canteiro de Obras",
+            "status": "ready",
+            "observations": None,
+            "pdf_filenames": ["canteiro.pdf"],
+            "final_context": {"obra": {"nome": "Bothanic"}},
+            "extraction_report": {"missing": [], "evidence": {}},
+            "conflicts": [],
+            "context_version": "eletrico_canteiro_v1",
+            "template_version": "eletrico_canteiro_v1",
+            "created_at": now,
+            "updated_at": now,
+        }
+        generate_mock.return_value = PipelineResult(
+            context={"obra": {"nome": "Bothanic Corrigido"}},
+            output_path=Path("/tmp/memorial_eletrico_canteiro_v1_corrigido.docx"),
+        )
+        create_mock.return_value = _memorial(
+            memorial_id="new-456", memorial_type="eletrico-canteiro"
+        )
+
+        response = routes.correct_persisted_memorial(
+            "old-123",
+            routes.MemorialCorrectionsPayload(corrections={"obra": {"nome": "Bothanic Corrigido"}}),
+            _request("POST", "/api/v1/memoriais/old-123/correcoes"),
+            _current_user(),
+        )
+
+        self.assertEqual(response.id, "new-456")
+        generate_mock.assert_called_once()
+        self.assertEqual(generate_mock.call_args.args[0]["obra"]["nome"], "Bothanic Corrigido")
+        create_kwargs = create_mock.call_args.kwargs
+        self.assertEqual(create_kwargs["memorial_type"], "eletrico-canteiro")
+        self.assertEqual(create_kwargs["context_version"], "eletrico_canteiro_v1")
+        self.assertEqual(create_kwargs["template_version"], "eletrico_canteiro_v1")
+
+    def test_validation_detail_for_eletrico_canteiro(self) -> None:
+        self.assertEqual(
+            routes._validation_detail_for_type("eletrico-canteiro"),
+            "Payload invalido para o memorial eletrico canteiro v1.",
+        )
+
     @patch("app.api.routes.get_generated_memorial")
     def test_get_memorial_returns_404_for_unknown_id(self, get_mock) -> None:
         get_mock.return_value = None

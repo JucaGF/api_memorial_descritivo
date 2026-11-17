@@ -65,6 +65,7 @@ from app.services.generated_memorial_store import (
 )
 from app.services.health import get_liveness_payload, get_readiness_payload
 from app.services.pipeline import (
+    generate_memorial_eletrico_canteiro_v1,
     generate_memorial_eletrico_v1,
     generate_memorial_gas_natural_v1,
     generate_memorial_glp_v1,
@@ -73,6 +74,7 @@ from app.services.pipeline import (
 )
 from app.services.pipeline_from_files import (
     extract_mapping_from_ingested_files,
+    generate_memorial_eletrico_canteiro_v1_from_uploaded_files,
     generate_memorial_gas_natural_v1_from_uploaded_files,
     generate_memorial_glp_v1_from_uploaded_files,
     generate_memorial_glp_v2_from_uploaded_files,
@@ -116,10 +118,17 @@ DOCX_MEDIA_TYPE = (
 
 router = APIRouter()
 
-_SUPPORTED_MEMORIAL_TYPES = {"eletrico", "telecom", "gas-natural", "glp"}
+_SUPPORTED_MEMORIAL_TYPES = {
+    "eletrico",
+    "eletrico-canteiro",
+    "telecom",
+    "gas-natural",
+    "glp",
+}
 _SUPPORTED_MEMORIAL_LIST_TYPES = _SUPPORTED_MEMORIAL_TYPES | {"glp_v2"}
 _PROJECT_NAME_BY_TYPE = {
     "eletrico": "Memorial Elétrico",
+    "eletrico-canteiro": "Memorial Elétrico Canteiro de Obras",
     "telecom": "Memorial Telecom",
     "gas-natural": "Memorial Gás Natural",
     "glp": "Memorial GLP",
@@ -397,6 +406,7 @@ def _ingestion_error_status_code(error: FileIngestionError) -> int:
 
 _TEMPLATE_VERSION_BY_TYPE = {
     "eletrico": "eletrico_v1",
+    "eletrico-canteiro": "eletrico_canteiro_v1",
     "telecom": "telecom_v1",
     "gas-natural": "gas_natural_v1",
     "glp": "glp_v1",
@@ -413,6 +423,10 @@ async def _generate_memorial_from_uploaded_files(
 ):
     if memorial_type == "eletrico":
         return await generate_memorial_eletrico_v1_from_uploaded_files(files, output_path)
+    if memorial_type == "eletrico-canteiro":
+        return await generate_memorial_eletrico_canteiro_v1_from_uploaded_files(
+            files, output_path
+        )
     if memorial_type == "telecom":
         return await generate_memorial_telecom_v1_from_uploaded_files(files, output_path)
     if memorial_type == "gas-natural":
@@ -429,6 +443,8 @@ def _generate_memorial_from_context(
 ):
     if memorial_type == "eletrico":
         return generate_memorial_eletrico_v1(context, output_path)
+    if memorial_type == "eletrico-canteiro":
+        return generate_memorial_eletrico_canteiro_v1(context, output_path)
     if memorial_type == "telecom":
         return generate_memorial_telecom_v1(context, output_path)
     if memorial_type == "gas-natural":
@@ -565,6 +581,8 @@ def _quantitative_conflict_error_response(
 def _validation_detail_for_type(memorial_type: str) -> str:
     if memorial_type == "eletrico":
         return "Payload invalido para o memorial eletrico v1."
+    if memorial_type == "eletrico-canteiro":
+        return "Payload invalido para o memorial eletrico canteiro v1."
     if memorial_type == "telecom":
         return "Payload invalido para o memorial telecom v1."
     if memorial_type == "gas-natural":
@@ -1060,6 +1078,47 @@ def create_memorial_telecom(
     )
 
 
+@router.post("/api/v1/memoriais/eletrico-canteiro", dependencies=[Depends(require_user)])
+def create_memorial_eletrico_canteiro(
+    payload: dict[str, Any],
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        generate_memorial_eletrico_canteiro_v1(payload, output_path)
+    except MemorialValidationError as error:
+        _remove_file(output_path)
+        _log_validation_failure(
+            request,
+            "eletrico-canteiro",
+            error,
+            "Memorial render validation failed",
+        )
+        return _validation_error_response(
+            error,
+            "Payload invalido para o memorial eletrico canteiro v1.",
+            request=request,
+        )
+    except MemorialRenderError as error:
+        _remove_file(output_path)
+        logger.error(
+            "Memorial render failed method=%s path=%s request_id=%s memorial_type=eletrico-canteiro error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_internal_server_error_response(request)
+
+    return _docx_file_response(
+        output_path, background_tasks, "memorial_eletrico_canteiro_v1.docx"
+    )
+
+
 @router.post("/api/v1/memoriais/gas-natural", dependencies=[Depends(require_user)])
 def create_memorial_gas_natural(
     payload: dict[str, Any],
@@ -1189,6 +1248,32 @@ async def upload_memorial_telecom_files(
 
 
 @router.post(
+    "/api/v1/memoriais/eletrico-canteiro/upload",
+    response_model=FileIngestionResponse,
+    dependencies=[Depends(require_user)],
+)
+async def upload_memorial_eletrico_canteiro_files(
+    request: Request,
+    files: list[UploadFile] | None = File(default=None),
+):
+    result = None
+    try:
+        result = await ingest_uploaded_files(files or [])
+    except FileIngestionError as error:
+        return build_client_error_response(
+            request=request,
+            status_code=_ingestion_error_status_code(error),
+            code=getattr(error, "code", None) or "ingestion_error",
+            message=error.detail,
+        )
+    finally:
+        if result is not None:
+            cleanup_ingestion_result(result)
+
+    return _file_ingestion_response(result)
+
+
+@router.post(
     "/api/v1/memoriais/gas-natural/upload",
     response_model=FileIngestionResponse,
     dependencies=[Depends(require_user)],
@@ -1296,6 +1381,70 @@ async def create_memorial_eletrico_from_files(
 
     return _docx_file_response(
         output_path, background_tasks, "memorial_eletrico_v1.docx"
+    )
+
+
+@router.post(
+    "/api/v1/memoriais/eletrico-canteiro/from-files",
+    dependencies=[Depends(require_user)],
+)
+async def create_memorial_eletrico_canteiro_from_files(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] | None = File(default=None),
+):
+    with NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        await generate_memorial_eletrico_canteiro_v1_from_uploaded_files(
+            files or [], output_path
+        )
+    except MemorialValidationError as error:
+        _remove_file(output_path)
+        _log_validation_failure(
+            request,
+            "eletrico-canteiro",
+            error,
+            "Memorial render from files validation failed",
+        )
+        return _validation_error_response(
+            error,
+            "Payload invalido para o memorial eletrico canteiro v1.",
+            request=request,
+        )
+    except (FileIngestionError, ProjectExtractionError) as error:
+        _remove_file(output_path)
+        error_code = getattr(error, "code", None) or (
+            "ingestion_error"
+            if isinstance(error, FileIngestionError)
+            else "project_extraction_error"
+        )
+        status_code = (
+            _ingestion_error_status_code(error)
+            if isinstance(error, FileIngestionError)
+            else 400
+        )
+        return build_client_error_response(
+            request=request,
+            status_code=status_code,
+            code=error_code,
+            message=str(getattr(error, "detail", error)),
+        )
+    except MemorialRenderError as error:
+        _remove_file(output_path)
+        logger.error(
+            "Memorial render from files failed method=%s path=%s request_id=%s memorial_type=eletrico-canteiro error_type=%s\n%s",
+            request.method,
+            request.url.path,
+            get_request_id(request),
+            type(error).__name__,
+            format_sanitized_exception_trace(error),
+        )
+        return build_internal_server_error_response(request)
+
+    return _docx_file_response(
+        output_path, background_tasks, "memorial_eletrico_canteiro_v1.docx"
     )
 
 

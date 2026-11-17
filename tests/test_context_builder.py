@@ -5,10 +5,14 @@ from pathlib import Path
 import unittest
 
 from app.services.context_builder import (
+    CANTEIRO_DEFAULTS,
+    QUADRO_DESCRICOES_CONHECIDAS,
+    build_memorial_eletrico_canteiro_v1_context,
     build_memorial_eletrico_v1_context,
     build_memorial_gas_natural_v1_context,
     build_memorial_telecom_v1_context,
     merge_context,
+    normalize_quadro_key,
 )
 
 
@@ -159,6 +163,207 @@ class MergeContextTests(unittest.TestCase):
 
         self.assertEqual(after_second["obra"]["nome"], "Makai")
         self.assertEqual(after_second["obra"]["construtora"], "MGA LTDA")
+
+
+class CanteiroContextBuilderTests(unittest.TestCase):
+    def test_canteiro_builder_defaults_mt_tensao_to_13_8(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context({"mt": {}})
+        self.assertEqual(ctx["mt"]["tensao_kv"], 13.8)
+
+    def test_canteiro_builder_keeps_extracted_mt_tensao(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context({"mt": {"tensao_kv": 13.2}})
+        self.assertEqual(ctx["mt"]["tensao_kv"], 13.2)
+
+    def test_canteiro_builder_does_not_default_mt_eletroduto_or_cabo(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context({"mt": {}})
+        for key in (
+            "diametro_eletroduto_pol",
+            "secao_cabo_mm2",
+            "tipo_cabo",
+            "temperatura_cabo",
+            "classe_isolacao",
+        ):
+            self.assertIsNone(ctx["mt"].get(key))
+
+    def test_canteiro_builder_applies_fixed_defaults(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context({})
+        self.assertEqual(ctx["aterramento"]["tipo_sistema"], "TN-S")
+        self.assertEqual(
+            ctx["energia"]["tensao_secundaria"],
+            "380 V entre fases e 220 V entre fases e neutro",
+        )
+        self.assertTrue(ctx["energia"]["tap_descricao"].startswith("Tap 1 – 13.800 V;"))
+        self.assertEqual(ctx["obra"]["porcentagem_entre_trafos"], "2%")
+        self.assertEqual(ctx["obra"]["porcentagem_entre_quadros"], "3%")
+        self.assertTrue(ctx["documento"]["data_atual"])
+
+    def test_canteiro_builder_extracted_values_beat_defaults(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {"aterramento": {"tipo_sistema": "TT"}, "energia": {"tensao_secundaria": "x"}}
+        )
+        self.assertEqual(ctx["aterramento"]["tipo_sistema"], "TT")
+        self.assertEqual(ctx["energia"]["tensao_secundaria"], "x")
+
+    def test_canteiro_builder_does_not_mutate_defaults_or_input(self) -> None:
+        payload = {"mt": {}}
+        build_memorial_eletrico_canteiro_v1_context(payload)
+        self.assertEqual(payload, {"mt": {}})
+        self.assertNotIn("diametro_eletroduto_pol", CANTEIRO_DEFAULTS["mt"])
+
+    def test_canteiro_builder_nulls_substation_fields_without_subestacao(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {"energia": {"tem_subestacao": False}}
+        )
+        for key in ("tipo_subestacao", "potencia_transformador_kva", "tap_descricao", "tensao_secundaria"):
+            self.assertIn(key, ctx["energia"])
+
+    def test_canteiro_builder_uses_engineer_description_for_torre(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {"quadros": [{"nome": "Q.D.L/T TORRE", "carga_w": 12714}]}
+        )
+        self.assertEqual(
+            ctx["quadros"][0]["descricao"],
+            "Circuitos de iluminação e tomadas para uso durante a execução da obra.",
+        )
+
+    def test_canteiro_builder_formats_quadro_load_and_known_description(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {"quadros": [{"nome": "Q.G.B.T.", "carga_w": 89088}]}
+        )
+        self.assertEqual(ctx["quadros"][0]["carga_formatada"], "89.088 W")
+        self.assertEqual(
+            ctx["quadros"][0]["descricao"],
+            "Concentra todos os demais quadros e equipamentos específicos de maior potência.",
+        )
+
+    def test_canteiro_builder_unknown_quadro_gets_null_description(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {"quadros": [{"nome": "Q.D.BOMBAS", "carga_w": 1000}]}
+        )
+        self.assertIsNone(ctx["quadros"][0]["descricao"])
+        self.assertEqual(ctx["quadros"][0]["carga_formatada"], "1.000 W")
+
+    def test_canteiro_builder_cremalheira_has_no_description(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {"quadros": [{"nome": "Q.D.ELEV. CREMALHEIRA", "carga_w": 13800}]}
+        )
+        self.assertIsNone(ctx["quadros"][0]["descricao"])
+
+    def test_canteiro_known_descriptions_keys(self) -> None:
+        self.assertEqual(
+            set(QUADRO_DESCRICOES_CONHECIDAS),
+            {"QGBT", "QDLTTORRE", "QDAPOIO", "QDSTAND", "QDMOVEL"},
+        )
+
+    def test_canteiro_builder_normalizes_name_accents_and_case(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {"quadros": [{"nome": "q.d. móvel", "carga_w": 3851}]}
+        )
+        self.assertEqual(
+            ctx["quadros"][0]["descricao"],
+            "Equipamentos móveis, como guinchos e vibradores.",
+        )
+
+    def test_canteiro_builder_keeps_explicit_description(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {"quadros": [{"nome": "Q.G.B.T.", "carga_w": 1, "descricao": "custom"}]}
+        )
+        self.assertEqual(ctx["quadros"][0]["descricao"], "custom")
+
+    def test_canteiro_builder_expands_short_tipo_subestacao(self) -> None:
+        cases = {
+            "aérea": "subestação aérea abaixadora",
+            "Aérea abaixadora": "subestação Aérea abaixadora",
+            "subestação aérea abaixadora": "subestação aérea abaixadora",
+            "SUBESTACAO AEREA": "SUBESTACAO AEREA",
+            "  aérea  ": "subestação aérea abaixadora",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                ctx = build_memorial_eletrico_canteiro_v1_context(
+                    {"energia": {"tem_subestacao": True, "tipo_subestacao": raw}}
+                )
+                self.assertEqual(ctx["energia"]["tipo_subestacao"], expected)
+
+    def test_canteiro_builder_leaves_missing_tipo_subestacao_for_validation(self) -> None:
+        for raw in (None, "", "   "):
+            with self.subTest(raw=raw):
+                ctx = build_memorial_eletrico_canteiro_v1_context(
+                    {"energia": {"tem_subestacao": True, "tipo_subestacao": raw}}
+                )
+                self.assertEqual(ctx["energia"]["tipo_subestacao"], raw)
+
+    def test_canteiro_builder_converts_integral_floats_to_int(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {
+                "energia": {"tem_subestacao": True, "potencia_transformador_kva": 75.0},
+                "aterramento": {"secao_cabo_cobre_mm2": 50.0},
+                "mt": {
+                    "tensao_kv": 13.8,
+                    "diametro_eletroduto_pol": 4.0,
+                    "secao_cabo_mm2": 35.0,
+                    "temperatura_cabo": 90.0,
+                },
+            }
+        )
+        for value, expected in (
+            (ctx["energia"]["potencia_transformador_kva"], 75),
+            (ctx["aterramento"]["secao_cabo_cobre_mm2"], 50),
+            (ctx["mt"]["diametro_eletroduto_pol"], 4),
+            (ctx["mt"]["secao_cabo_mm2"], 35),
+            (ctx["mt"]["temperatura_cabo"], 90),
+        ):
+            self.assertEqual(value, expected)
+            self.assertIs(type(value), int)
+        self.assertEqual(ctx["mt"]["tensao_kv"], 13.8)
+
+    def test_canteiro_builder_keeps_fractional_floats_and_tensao_kv(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {
+                "energia": {"tem_subestacao": True, "potencia_transformador_kva": 112.5},
+                "aterramento": {"secao_cabo_cobre_mm2": 2.5},
+                "mt": {"tensao_kv": 15.0, "diametro_eletroduto_pol": 1.5},
+            }
+        )
+        self.assertEqual(ctx["energia"]["potencia_transformador_kva"], 112.5)
+        self.assertEqual(ctx["aterramento"]["secao_cabo_cobre_mm2"], 2.5)
+        self.assertEqual(ctx["mt"]["diametro_eletroduto_pol"], 1.5)
+        self.assertIs(type(ctx["mt"]["tensao_kv"]), float)
+
+    def test_canteiro_builder_always_uses_fixed_taps_and_secondary_with_subestacao(self) -> None:
+        ctx = build_memorial_eletrico_canteiro_v1_context(
+            {
+                "energia": {
+                    "tem_subestacao": True,
+                    "tap_descricao": "tap nominal",
+                    "tensao_secundaria": "220/127V",
+                }
+            }
+        )
+        self.assertEqual(
+            ctx["energia"]["tap_descricao"], CANTEIRO_DEFAULTS["energia"]["tap_descricao"]
+        )
+        self.assertEqual(
+            ctx["energia"]["tensao_secundaria"],
+            CANTEIRO_DEFAULTS["energia"]["tensao_secundaria"],
+        )
+
+    def test_canteiro_builder_strips_trailing_dot_from_localizacao(self) -> None:
+        for raw, expected in (
+            ("Cabo Branco, João Pessoa - PB.", "Cabo Branco, João Pessoa - PB"),
+            ("Cabo Branco, João Pessoa - PB. ", "Cabo Branco, João Pessoa - PB"),
+            ("Cabo Branco, João Pessoa - PB", "Cabo Branco, João Pessoa - PB"),
+        ):
+            with self.subTest(raw=raw):
+                ctx = build_memorial_eletrico_canteiro_v1_context(
+                    {"obra": {"localizacao": raw}}
+                )
+                self.assertEqual(ctx["obra"]["localizacao"], expected)
+
+    def test_normalize_quadro_key_ignores_punctuation_spaces_case_and_accents(self) -> None:
+        self.assertEqual(normalize_quadro_key("Q.G.B.T."), normalize_quadro_key("q.g.b.t"))
+        self.assertEqual(normalize_quadro_key("Q.D. MÓVEL"), "QDMOVEL")
+        self.assertEqual(normalize_quadro_key(None), "")
 
 
 if __name__ == "__main__":

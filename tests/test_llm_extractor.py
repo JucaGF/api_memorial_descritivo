@@ -6,7 +6,16 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.services.llm_extractor import (
+    ELETRICO_CANTEIRO_EXTRACTION_PROMPT,
+    ELETRICO_CANTEIRO_MERGE_PROMPT,
+    ELETRICO_CANTEIRO_STRATEGY,
+    CanteiroAterramentoExtraction,
+    CanteiroObraExtraction,
+    EletricoCanteiroLLMExtraction,
     EnergiaExtraction,
+    EquipamentoExtraction,
+    MTExtraction,
+    QuadroExtraction,
     GasNaturalLLMExtraction,
     GLP_EXTRACTION_PROMPT,
     GLP_V2_EXTRACTION_PROMPT,
@@ -15,6 +24,7 @@ from app.services.llm_extractor import (
     InstalacaoExtraction,
     LLMExtraction,
     NaoInclusosExtraction,
+    LLMExtractionRunResult,
     ObraExtraction,
     TelecomLLMExtraction,
     _build_gas_natural_text_only_input,
@@ -28,6 +38,7 @@ from app.services.llm_extractor import (
     _first_non_null_merge,
     extract_gas_natural_with_llm,
     extract_glp_with_llm,
+    extract_eletrico_canteiro_with_llm_result,
     extract_telecom_with_llm,
     extract_with_llm,
     is_llm_extraction_enabled,
@@ -1212,6 +1223,219 @@ class ExtractWithLLMTests(unittest.TestCase):
 
         self.assertEqual(mock_client.responses.parse.call_count, 3)
         self.assertEqual(result["obra"]["construtora"], "GLP A")
+
+
+class EletricoCanteiroLLMTests(unittest.TestCase):
+    def test_canteiro_llm_schema_defaults_are_empty(self) -> None:
+        m = EletricoCanteiroLLMExtraction()
+        self.assertEqual(m.quadros, [])
+        self.assertEqual(m.equipamentos, [])
+        self.assertIsNone(m.obra.nome)
+        self.assertIsNone(m.mt.secao_cabo_mm2)
+        self.assertIsNone(m.observacoes)
+
+    def test_canteiro_llm_schema_has_no_building_fields(self) -> None:
+        for field in (
+            "qtd_apartamentos", "qtd_lojas", "qtd_restaurantes",
+            "tipo_edificacao", "tipologia",
+        ):
+            self.assertNotIn(field, CanteiroObraExtraction.model_fields)
+        self.assertEqual(
+            set(CanteiroAterramentoExtraction.model_fields),
+            {"qtd_hastes", "secao_cabo_cobre_mm2"},
+        )
+        self.assertNotIn("gerador", EletricoCanteiroLLMExtraction.model_fields)
+
+    def test_canteiro_llm_schema_is_openai_strict_compatible(self) -> None:
+        from openai.lib._pydantic import to_strict_json_schema
+
+        schema = to_strict_json_schema(EletricoCanteiroLLMExtraction)
+        self.assertEqual(schema["type"], "object")
+
+    def test_canteiro_prompt_states_key_rules(self) -> None:
+        p = ELETRICO_CANTEIRO_EXTRACTION_PROMPT
+        self.assertIn("SE AÉREA", p)
+        self.assertIn("Q.G.B.T.", p)
+        self.assertIn("0,6/1 kV", p)
+        self.assertIn("null", p)
+        self.assertIn("legend", p.lower())
+        self.assertIn("NEVER", p)
+        self.assertIn("one unit per symbol", p)
+        self.assertTrue(ELETRICO_CANTEIRO_MERGE_PROMPT.rstrip().endswith("Per-file extractions:"))
+
+    def test_canteiro_prompt_asks_full_substation_phrase_and_false_without_se(self) -> None:
+        p = ELETRICO_CANTEIRO_EXTRACTION_PROMPT
+        self.assertIn('"subestação aérea abaixadora"', p)
+        self.assertNotIn('tipo_subestacao: "aérea"', p)
+        self.assertIn("false when no substation", p)
+
+    def test_canteiro_prompt_does_not_ask_for_fixed_taps_or_secondary(self) -> None:
+        p = ELETRICO_CANTEIRO_EXTRACTION_PROMPT
+        self.assertNotIn("only if the drawing explicitly states them", p)
+        self.assertIn("Do NOT extract tap_descricao or tensao_secundaria", p)
+
+    def test_canteiro_merge_prompt_keeps_substation_seen_on_any_sheet(self) -> None:
+        self.assertIn("tem_subestacao is true if ANY file", ELETRICO_CANTEIRO_MERGE_PROMPT)
+
+    def test_canteiro_fallback_merge_keeps_substation_seen_on_any_sheet(self) -> None:
+        from app.services.llm_extractor import _eletrico_canteiro_fallback_merge
+
+        sheet_without_se = EletricoCanteiroLLMExtraction(
+            energia=EnergiaExtraction(tem_subestacao=False)
+        ).model_dump(mode="json")
+        sheet_with_se = EletricoCanteiroLLMExtraction(
+            energia=EnergiaExtraction(
+                tem_subestacao=True,
+                tipo_subestacao="subestação aérea abaixadora",
+                potencia_transformador_kva=75,
+            )
+        ).model_dump(mode="json")
+
+        merged = _eletrico_canteiro_fallback_merge([sheet_without_se, sheet_with_se])
+        self.assertIs(merged["energia"]["tem_subestacao"], True)
+        self.assertEqual(merged["energia"]["potencia_transformador_kva"], 75)
+
+        merged = _eletrico_canteiro_fallback_merge([sheet_without_se, sheet_without_se])
+        self.assertIs(merged["energia"]["tem_subestacao"], False)
+
+    def test_canteiro_strategy_wiring(self) -> None:
+        self.assertIs(ELETRICO_CANTEIRO_STRATEGY.text_format, EletricoCanteiroLLMExtraction)
+
+    def test_extract_eletrico_canteiro_returns_empty_when_disabled(self) -> None:
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": ""}):
+            result = extract_eletrico_canteiro_with_llm_result([_source_file()])
+        self.assertEqual(result.context, {})
+
+    def test_extract_eletrico_canteiro_uses_canteiro_strategy(self) -> None:
+        sentinel = LLMExtractionRunResult(context={"x": 1})
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}), patch(
+            "app.services.llm_extractor._run_llm_extraction", return_value=sentinel
+        ) as run_mock:
+            files = [_source_file()]
+            result = extract_eletrico_canteiro_with_llm_result(files)
+        run_mock.assert_called_once_with(files, ELETRICO_CANTEIRO_STRATEGY)
+        self.assertIs(result, sentinel)
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_single_file_canteiro_extraction_with_mocked_client(
+        self, _model_mock, client_mock
+    ) -> None:
+        parsed = EletricoCanteiroLLMExtraction(
+            obra=CanteiroObraExtraction(nome="Bothanic"),
+            mt=MTExtraction(),
+            equipamentos=[
+                EquipamentoExtraction(nome="Betoneira", potencia="7,5 CV", qtd=1),
+                EquipamentoExtraction(nome="Mini guincho", qtd=1),
+            ],
+            quadros=[QuadroExtraction(nome="Q.G.B.T.", carga_w=89088)],
+        )
+        response = MagicMock()
+        response.output_parsed = parsed
+        client = MagicMock()
+        client.responses.parse.return_value = response
+        client_mock.return_value = client
+
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_eletrico_canteiro_with_llm_result([_source_file()]).context
+
+        kwargs = client.responses.parse.call_args.kwargs
+        self.assertIs(kwargs["text_format"], EletricoCanteiroLLMExtraction)
+        self.assertEqual(result["obra"]["nome"], "Bothanic")
+        self.assertEqual(result["quadros"][0]["carga_w"], 89088)
+        self.assertEqual(result["equipamentos"][0]["potencia"], "7,5 CV")
+        self.assertIsNone(result["equipamentos"][1]["potencia"])
+        self.assertIsNone(result["mt"]["secao_cabo_mm2"])
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_multiple_canteiro_files_trigger_canteiro_merge(
+        self, _model_mock, client_mock
+    ) -> None:
+        parsed = EletricoCanteiroLLMExtraction(obra=CanteiroObraExtraction(nome="Bothanic"))
+        response = MagicMock()
+        response.output_parsed = parsed
+        client = MagicMock()
+        client.responses.parse.return_value = response
+        client_mock.return_value = client
+
+        files = [_source_file("a.pdf"), _source_file("b.pdf")]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_eletrico_canteiro_with_llm_result(files).context
+
+        self.assertEqual(client.responses.parse.call_count, 3)
+        merge_call = client.responses.parse.call_args_list[-1].kwargs
+        merge_text = merge_call["input"][0]["content"][0]["text"]
+        self.assertIn("canteiro", merge_text.lower())
+        self.assertIs(merge_call["text_format"], EletricoCanteiroLLMExtraction)
+        self.assertEqual(result["obra"]["nome"], "Bothanic")
+
+    @patch("app.services.llm_extractor._get_client")
+    @patch("app.services.llm_extractor._get_model", return_value="gpt-5.4")
+    def test_canteiro_merge_failure_keeps_lists_with_local_fallback(
+        self, _model_mock, client_mock
+    ) -> None:
+        per_file = {
+            "a.pdf": EletricoCanteiroLLMExtraction(
+                obra=CanteiroObraExtraction(nome="Bothanic"),
+                equipamentos=[
+                    EquipamentoExtraction(nome="Betoneira", potencia="7,5 CV", qtd=1),
+                ],
+                quadros=[
+                    QuadroExtraction(nome="Q.G.B.T.", carga_w=89088),
+                    QuadroExtraction(nome="Q.D.L/T TORRE", carga_w=12714),
+                ],
+            ),
+            "b.pdf": EletricoCanteiroLLMExtraction(
+                obra=CanteiroObraExtraction(nome="Outro nome", localizacao="Cabo Branco"),
+                equipamentos=[
+                    EquipamentoExtraction(nome="Betoneira", potencia="7,5 CV", qtd=1),
+                    EquipamentoExtraction(nome="Policorte", potencia="3 CV", qtd=1),
+                ],
+                quadros=[
+                    QuadroExtraction(nome="Q.G.B.T", carga_w=89088),
+                    QuadroExtraction(nome="Q.D.STAND", carga_w=9170),
+                ],
+            ),
+        }
+
+        def parse_side_effect(**kwargs):
+            content = kwargs["input"][0]["content"]
+            if content[0]["text"].startswith(ELETRICO_CANTEIRO_MERGE_PROMPT):
+                raise RuntimeError("merge unavailable")
+            filename = "a.pdf" if "=== FILE: a.pdf ===" in content[1]["text"] else "b.pdf"
+            response = MagicMock()
+            response.output_parsed = per_file[filename]
+            return response
+
+        client = MagicMock()
+        client.responses.parse.side_effect = parse_side_effect
+        client_mock.return_value = client
+
+        files = [_source_file("a.pdf"), _source_file("b.pdf")]
+        with patch.dict(os.environ, {"USE_LLM_EXTRACTION": "true"}):
+            result = extract_eletrico_canteiro_with_llm_result(files)
+
+        self.assertEqual(client.responses.parse.call_count, 3)
+        self.assertTrue(result.cross_validation["batch_merge_fallback_used"])
+        context = result.context
+        self.assertEqual(context["obra"]["nome"], "Bothanic")
+        self.assertEqual(context["obra"]["localizacao"], "Cabo Branco")
+        self.assertEqual(
+            [quadro["nome"] for quadro in context["quadros"]],
+            ["Q.G.B.T.", "Q.D.L/T TORRE", "Q.D.STAND"],
+        )
+        self.assertEqual(
+            context["equipamentos"],
+            [{"nome": "Betoneira", "potencia": "7,5 CV", "qtd": 1}],
+        )
+
+    def test_shared_first_non_null_merge_still_ignores_lists(self) -> None:
+        merged = _first_non_null_merge([
+            {"obra": {"nome": "A"}, "quadros": [{"nome": "Q.G.B.T.", "carga_w": 1}]},
+        ])
+
+        self.assertEqual(merged, {"obra": {"nome": "A"}})
 
 
 if __name__ == "__main__":

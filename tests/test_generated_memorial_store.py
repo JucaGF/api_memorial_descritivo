@@ -91,6 +91,16 @@ class GeneratedMemorialStoreTests(unittest.TestCase):
         )
         self.assertEqual(memorial.download_url, "https://signed.example/download")
 
+    def test_generated_memorial_store_filename_for_eletrico_canteiro(self) -> None:
+        self.assertEqual(
+            store._FILENAME_BY_TYPE["eletrico-canteiro"],
+            "memorial_eletrico_canteiro_v1.docx",
+        )
+        self.assertEqual(
+            store._expected_storage_path("eletrico-canteiro", "abc"),
+            "eletrico-canteiro/abc/memorial_eletrico_canteiro_v1.docx",
+        )
+
     def test_create_generated_memorial_marks_record_as_failed_when_upload_fails(self) -> None:
         self._table().insert.return_value.execute.return_value = _mock_response([])
         self._table().update.return_value.eq.return_value.execute.return_value = _mock_response([])

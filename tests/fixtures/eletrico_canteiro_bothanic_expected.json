@@ -1,0 +1,42 @@
+{
+  "obra": {
+    "numero_cadastro": "46/2024",
+    "construtora": "MOREIRA & RUFFO'S LTDA",
+    "nome": "BOTHANIC",
+    "localizacao": "R. Manuel Cavalcanti de Souza esq. c/ a Av. Adolfo Loureiro, S/N, Cabo Branco, João Pessoa - PB"
+  },
+  "energia": {
+    "tem_subestacao": true,
+    "tipo_subestacao": "subestação aérea abaixadora",
+    "potencia_transformador_kva": 75
+  },
+  "mt": {
+    "tensao_kv": 13.8,
+    "diametro_eletroduto_pol": null,
+    "secao_cabo_mm2": null,
+    "tipo_cabo": null,
+    "temperatura_cabo": null,
+    "classe_isolacao": null
+  },
+  "aterramento": {
+    "qtd_hastes": 3,
+    "secao_cabo_cobre_mm2": 50
+  },
+  "equipamentos": [
+    {"nome": "Betoneira", "potencia": "7,5 CV", "qtd": 1},
+    {"nome": "Policorte", "potencia": "3 CV", "qtd": 1},
+    {"nome": "Bancada de serra", "potencia": "5 CV", "qtd": 1},
+    {"nome": "Peneira", "potencia": "1 CV", "qtd": 1},
+    {"nome": "Esmeril", "potencia": "1/4 CV", "qtd": 1},
+    {"nome": "Mini guincho", "potencia": null, "qtd": 1},
+    {"nome": "Elevador cremalheira", "potencia": null, "qtd": 1}
+  ],
+  "quadros": [
+    {"nome": "Q.G.B.T.", "carga_w": 89088},
+    {"nome": "Q.D.L/T TORRE", "carga_w": 12714},
+    {"nome": "Q.D.STAND", "carga_w": 9170},
+    {"nome": "Q.D.APOIO", "carga_w": 33837},
+    {"nome": "Q.D.ELEV. CREMALHEIRA", "carga_w": 13800},
+    {"nome": "Q.D.MÓVEL", "carga_w": 3851}
+  ]
+}

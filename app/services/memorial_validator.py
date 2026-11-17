@@ -9,6 +9,9 @@ from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 ELETRICO_V1_SCHEMA_PATH = ROOT_DIR / "templates" / "eletrico" / "v1" / "schema.json"
+ELETRICO_CANTEIRO_V1_SCHEMA_PATH = (
+    ROOT_DIR / "templates" / "eletrico_canteiro" / "v1" / "schema.json"
+)
 TELECOM_V1_SCHEMA_PATH = ROOT_DIR / "templates" / "telecom" / "v1" / "schema.json"
 GAS_NATURAL_V1_SCHEMA_PATH = ROOT_DIR / "templates" / "gas_natural" / "v1" / "schema.json"
 GLP_V1_SCHEMA_PATH = ROOT_DIR / "templates" / "glp" / "v1" / "schema.json"
@@ -49,6 +52,11 @@ def load_eletrico_v1_schema() -> dict[str, Any]:
         return json.load(file)
 
 
+def load_eletrico_canteiro_v1_schema() -> dict[str, Any]:
+    with ELETRICO_CANTEIRO_V1_SCHEMA_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
 def load_telecom_v1_schema() -> dict[str, Any]:
     with TELECOM_V1_SCHEMA_PATH.open("r", encoding="utf-8") as file:
         return json.load(file)
@@ -85,6 +93,26 @@ def validate_memorial_eletrico_v1_context(
     if issues:
         raise MemorialValidationError(issues)
     return issues
+
+
+def validate_memorial_eletrico_canteiro_v1_context(
+    context: dict[str, Any],
+) -> None:
+    _require_jsonschema_dependency()
+    from jsonschema import Draft202012Validator
+
+    validator = Draft202012Validator(load_eletrico_canteiro_v1_schema())
+    errors = sorted(validator.iter_errors(context), key=lambda error: list(error.absolute_path))
+    issues = [
+        ValidationIssue(
+            path=_format_error_path(error),
+            message=error.message,
+            validator=error.validator,
+        )
+        for error in errors
+    ]
+    if issues:
+        raise MemorialValidationError(issues)
 
 
 def validate_memorial_telecom_v1_context(

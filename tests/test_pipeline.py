@@ -5,9 +5,11 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from app.services.memorial_renderer import has_docx_render_dependencies, inspect_docx_text
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import (
     PipelineResult,
+    generate_memorial_eletrico_canteiro_v1,
     generate_memorial_eletrico_v1,
     generate_memorial_gas_natural_v1,
     generate_memorial_telecom_v1,
@@ -166,6 +168,53 @@ class PipelineTests(unittest.TestCase):
         validate_mock.assert_called_once()
         render_mock.assert_not_called()
 
+
+    @unittest.skipUnless(
+        has_docx_render_dependencies(),
+        "python-docx e docxtpl nao estao instalados no ambiente",
+    )
+    def test_generate_memorial_eletrico_canteiro_v1_writes_docx(self) -> None:
+        payload = load_fixture("eletrico_canteiro_bothanic_expected.json")
+        del payload["mt"]["tensao_kv"]
+        output_path = ROOT / "tests" / "output" / "pipeline_renderizado_canteiro.docx"
+        if output_path.exists():
+            output_path.unlink()
+
+        result = generate_memorial_eletrico_canteiro_v1(payload, output_path)
+
+        self.assertIsInstance(result, PipelineResult)
+        self.assertEqual(result.output_path, output_path)
+        self.assertTrue(result.output_path.exists())
+        self.assertEqual(result.context["mt"]["tensao_kv"], 13.8)
+        self.assertEqual(result.context["quadros"][0]["carga_formatada"], "89.088 W")
+        self.assertIn("data_atual", result.context["documento"])
+        self.assertIn("MT-13.8kV", inspect_docx_text(result.output_path))
+
+    @patch("app.services.pipeline.validate_memorial_eletrico_canteiro_v1_context")
+    @patch("app.services.pipeline.render_memorial_eletrico_canteiro_v1")
+    def test_generate_memorial_eletrico_canteiro_v1_does_not_render_when_validation_fails(
+        self,
+        render_mock,
+        validate_mock,
+    ) -> None:
+        payload = load_fixture("eletrico_canteiro_bothanic_expected.json")
+        del payload["obra"]["nome"]
+        output_path = ROOT / "tests" / "output" / "pipeline_invalido_canteiro.docx"
+        validate_mock.side_effect = MemorialValidationError(
+            [
+                ValidationIssue(
+                    path="$.obra",
+                    message="'nome' is a required property",
+                    validator="required",
+                )
+            ]
+        )
+
+        with self.assertRaises(MemorialValidationError):
+            generate_memorial_eletrico_canteiro_v1(payload, output_path)
+
+        validate_mock.assert_called_once()
+        render_mock.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

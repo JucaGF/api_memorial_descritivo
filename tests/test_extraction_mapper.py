@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import time
 import unittest
+from pathlib import Path
 
 from app.services.extraction_mapper import (
     ExtractionReport,
     FieldExtraction,
     MappingResult,
+    assess_eletrico_canteiro_extraction_coverage,
     assess_extraction_coverage,
     assess_gas_natural_extraction_coverage,
     assess_telecom_extraction_coverage,
     map_extraction_to_partial_context,
+    map_extraction_to_partial_eletrico_canteiro_context,
     map_extraction_to_partial_gas_natural_context,
     map_extraction_to_partial_glp_v2_context,
     map_extraction_to_partial_telecom_context,
@@ -645,6 +649,96 @@ class GlpV2MapperTests(unittest.TestCase):
         diam = result.context.get("diametros", {}).get("tubulacao_principal")
 
         self.assertEqual(diam["valor_formatado"], '1 1/4"')
+
+
+BOTHANIC_TEXT_FIXTURE = Path(__file__).parent / "fixtures" / "canteiro_bothanic_planta_text.txt"
+
+
+def bothanic_extraction() -> ProjectExtractionResult:
+    return build_extraction_result(BOTHANIC_TEXT_FIXTURE.read_text(encoding="utf-8"))
+
+
+class EletricoCanteiroMapperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.result = map_extraction_to_partial_eletrico_canteiro_context(bothanic_extraction())
+        self.ctx = self.result.context
+
+    def test_canteiro_mapper_extracts_bothanic_core_fields(self) -> None:
+        ctx = self.ctx
+        self.assertEqual(ctx["obra"]["construtora"], "MOREIRA & RUFFO'S LTDA")
+        self.assertEqual(ctx["obra"]["numero_cadastro"], "46/2024")
+        self.assertIs(ctx["energia"]["tem_subestacao"], True)
+        self.assertEqual(ctx["energia"]["tipo_subestacao"], "subestação aérea abaixadora")
+        self.assertEqual(ctx["energia"]["potencia_transformador_kva"], 75)
+        self.assertEqual(ctx["aterramento"]["qtd_hastes"], 3)
+        self.assertEqual(ctx["aterramento"]["secao_cabo_cobre_mm2"], 50)
+
+    def test_canteiro_mapper_dedupes_quadros_repeated_across_sheets(self) -> None:
+        self.assertEqual(len(self.ctx["quadros"]), 6)
+
+    def test_canteiro_mapper_parses_brazilian_thousands_in_quadro_loads(self) -> None:
+        self.assertEqual(
+            {q["nome"]: q["carga_w"] for q in self.ctx["quadros"]},
+            {
+                "Q.G.B.T.": 89088,
+                "Q.D.L/T TORRE": 12714,
+                "Q.D.STAND": 9170,
+                "Q.D.APOIO": 33837,
+                "Q.D.ELEV. CREMALHEIRA": 13800,
+                "Q.D.MÓVEL": 3851,
+            },
+        )
+
+    def test_canteiro_mapper_does_not_infer_tipo_sistema_from_legend(self) -> None:
+        self.assertNotIn("tipo_sistema", self.ctx.get("aterramento", {}))
+
+    def test_canteiro_mapper_does_not_take_bt_feeder_as_mt_cable(self) -> None:
+        mt = self.ctx.get("mt", {})
+        self.assertIsNone(mt.get("secao_cabo_mm2"))
+        self.assertIsNone(mt.get("diametro_eletroduto_pol"))
+
+    def test_canteiro_coverage_reports_equipamentos_and_mt_cabo_as_pending(self) -> None:
+        report = assess_eletrico_canteiro_extraction_coverage(self.result)
+        for path in ("quadros", "energia.potencia_transformador_kva", "aterramento.qtd_hastes"):
+            self.assertIn(path, report.filled)
+        for path in ("equipamentos", "mt.secao_cabo_mm2", "mt.diametro_eletroduto_pol"):
+            self.assertIn(path, report.pending)
+            self.assertNotIn(path, report.filled)
+        self.assertEqual(report.missing, [])
+
+    def test_canteiro_mapper_dedupes_quadros_by_normalized_name(self) -> None:
+        ctx = map_extraction_to_partial_eletrico_canteiro_context(
+            build_extraction_result(
+                "Q.D.APOIO= 33.837 W\nDIAGRAMA\nQ.D. APOIO = 33.837 W\nQ.D.STAND= 9.170 W"
+            )
+        ).context
+        self.assertEqual(
+            [q["nome"] for q in ctx["quadros"]],
+            ["Q.D.APOIO", "Q.D.STAND"],
+        )
+
+    def test_canteiro_mapper_without_canteiro_data_returns_no_quadros(self) -> None:
+        ctx = map_extraction_to_partial_eletrico_canteiro_context(
+            build_extraction_result("Texto sem dados de canteiro.")
+        ).context
+        self.assertNotIn("quadros", ctx)
+
+    def test_canteiro_quadro_regex_is_linear_on_adversarial_text(self) -> None:
+        adversarial = "Q.D. " * 40000
+        started = time.perf_counter()
+        ctx = map_extraction_to_partial_eletrico_canteiro_context(
+            build_extraction_result(adversarial)
+        ).context
+        elapsed = time.perf_counter() - started
+        self.assertNotIn("quadros", ctx)
+        self.assertLess(elapsed, 1.0)
+
+    def test_canteiro_quadro_regex_accepts_40_char_name(self) -> None:
+        nome = "Q.D." + "A" * 40
+        ctx = map_extraction_to_partial_eletrico_canteiro_context(
+            build_extraction_result(f"{nome} = 1.000 W")
+        ).context
+        self.assertEqual(ctx["quadros"], [{"nome": nome, "carga_w": 1000}])
 
 
 if __name__ == "__main__":

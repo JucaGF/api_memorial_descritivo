@@ -1,23 +1,31 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import unicodedata
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from app.services.context_builder import build_memorial_glp_v2_context, merge_context
+from app.services.context_builder import (
+    build_memorial_glp_v2_context,
+    merge_context,
+    normalize_quadro_key,
+)
 from app.services.diameter_normalizer import normalize_diameter
 from app.services.extraction_mapper import (
     ExtractionReport,
     MappingResult,
+    assess_eletrico_canteiro_extraction_coverage,
     assess_extraction_coverage,
     assess_gas_natural_extraction_coverage,
     assess_glp_extraction_coverage,
     assess_glp_v2_extraction_coverage,
     assess_telecom_extraction_coverage,
     map_extraction_to_partial_context,
+    map_extraction_to_partial_eletrico_canteiro_context,
     map_extraction_to_partial_gas_natural_context,
     map_extraction_to_partial_glp_context,
     map_extraction_to_partial_glp_v2_context,
@@ -30,6 +38,7 @@ from app.services.file_ingestion import (
     ingest_uploaded_files,
 )
 from app.services.llm_extractor import (
+    extract_eletrico_canteiro_with_llm_result,
     extract_gas_natural_with_llm_result,
     extract_glp_v2_with_llm_result,
     extract_glp_with_llm_result,
@@ -40,6 +49,7 @@ from app.services.llm_extractor import (
 from app.services.memorial_validator import MemorialValidationError, ValidationIssue
 from app.services.pipeline import (
     PipelineResult,
+    generate_memorial_eletrico_canteiro_v1,
     generate_memorial_eletrico_v1,
     generate_memorial_gas_natural_v1,
     generate_memorial_glp_v1,
@@ -861,6 +871,211 @@ def extract_telecom_mapping_from_ingested_files(
     return mapping, report
 
 
+_CANTEIRO_LIST_SECTIONS = ("quadros", "equipamentos")
+_CANTEIRO_ADJUSTMENTS_KEY = "canteiro_list_adjustments"
+
+
+def _is_positive_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _has_nome(item: Any) -> bool:
+    return isinstance(item, dict) and isinstance(item.get("nome"), str) and bool(item["nome"].strip())
+
+
+def _clean_canteiro_llm_lists(
+    llm_context: dict[str, Any],
+    mapper_context: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Saneia os itens de lista da LLM antes da regra "LLM vence o mapper".
+
+    Um item malformado nao pode derrubar o memorial inteiro: item sem nome sai;
+    quadro sem carga valida pega a carga do quadro homonimo do mapper ou sai;
+    equipamento sem qtd valida vira qtd 1 (um simbolo = uma unidade).
+    """
+    context = deepcopy(llm_context)
+    adjustments: list[dict[str, Any]] = []
+
+    mapper_cargas: dict[str, Any] = {}
+    for quadro in mapper_context.get("quadros") or []:
+        if _has_nome(quadro) and _is_positive_number(quadro.get("carga_w")):
+            mapper_cargas.setdefault(normalize_quadro_key(quadro["nome"]), quadro["carga_w"])
+
+    if isinstance(context.get("quadros"), list):
+        quadros: list[dict[str, Any]] = []
+        for index, quadro in enumerate(context["quadros"]):
+            if not _has_nome(quadro):
+                adjustments.append(
+                    {"lista": "quadros", "indice": index, "acao": "descartado", "motivo": "nome ausente"}
+                )
+                continue
+            if not _is_positive_number(quadro.get("carga_w")):
+                mapper_carga = mapper_cargas.get(normalize_quadro_key(quadro["nome"]))
+                if mapper_carga is None:
+                    adjustments.append(
+                        {"lista": "quadros", "nome": quadro["nome"], "acao": "descartado", "motivo": "carga_w ausente"}
+                    )
+                    continue
+                quadro = {**quadro, "carga_w": mapper_carga}
+                adjustments.append(
+                    {"lista": "quadros", "nome": quadro["nome"], "acao": "carga_do_mapper", "valor": mapper_carga}
+                )
+            quadros.append(quadro)
+        context["quadros"] = quadros
+
+    if isinstance(context.get("equipamentos"), list):
+        equipamentos: list[dict[str, Any]] = []
+        for index, equipamento in enumerate(context["equipamentos"]):
+            if not _has_nome(equipamento):
+                adjustments.append(
+                    {"lista": "equipamentos", "indice": index, "acao": "descartado", "motivo": "nome ausente"}
+                )
+                continue
+            qtd = equipamento.get("qtd")
+            if isinstance(qtd, bool) or not isinstance(qtd, int) or qtd < 1:
+                equipamento = {**equipamento, "qtd": 1}
+                adjustments.append(
+                    {"lista": "equipamentos", "nome": equipamento["nome"], "acao": "qtd_padrao", "valor": 1}
+                )
+            equipamentos.append(equipamento)
+        context["equipamentos"] = equipamentos
+
+    if adjustments:
+        logger.info("Eletrico canteiro LLM list items adjusted: %d", len(adjustments))
+    return context, adjustments
+
+
+def _merge_canteiro_llm_with_mapper(
+    llm_context: dict[str, Any],
+    mapper_context: dict[str, Any],
+) -> dict[str, Any]:
+    """LLM e a fonte principal; o mapper preenche so os campos None.
+
+    quadros e equipamentos sao valor unico: a lista do mapper so entra quando a
+    da LLM vier vazia ou ausente (nunca uniao entre as duas). Os itens da LLM
+    ja devem chegar saneados (_clean_canteiro_llm_lists).
+    """
+    gap_fills = _fill_gaps(llm_context, mapper_context)
+    if gap_fills:
+        gap_count = sum(len(s) for s in gap_fills.values() if isinstance(s, dict))
+        logger.info("Eletrico canteiro mapper supplemented %d additional fields", gap_count)
+        final_context = merge_context(llm_context, gap_fills)
+    else:
+        final_context = deepcopy(llm_context)
+
+    for list_key in _CANTEIRO_LIST_SECTIONS:
+        if final_context.get(list_key):
+            continue
+        mapper_list = mapper_context.get(list_key)
+        if mapper_list:
+            logger.info("Eletrico canteiro mapper supplied %s (%d items)", list_key, len(mapper_list))
+            final_context[list_key] = deepcopy(mapper_list)
+        else:
+            # Lista vazia = nao encontrada: fora do contexto para o relatorio
+            # nao conta-la como preenchida.
+            final_context.pop(list_key, None)
+    return final_context
+
+
+def _apply_canteiro_mapper_authority(
+    context: dict[str, Any],
+    mapper_mapping: MappingResult,
+) -> list[dict[str, Any]]:
+    """Regras do canteiro aplicadas depois do merge LLM + mapper (in place).
+
+    - obra.numero_cadastro: o do mapper vence o da LLM, que pode pegar o numero
+      da prancha ("01/02") -- so quando veio da regex nnn/aaaa (confianca alta);
+      o fallback por rotulo do mapper pode trazer lixo ("INDICADAS").
+    - energia.tem_subestacao: a SE detectada pelo mapper ("SE AEREA nnKVA")
+      vence um false da LLM; sem SE da LLM nem do mapper, vira false (canteiro
+      alimentado direto pela rede, secao 4.2 fora do documento).
+    """
+    adjustments: list[dict[str, Any]] = []
+    mapper_context = mapper_mapping.context
+
+    mapper_numero = mapper_mapping.evidence.get("obra.numero_cadastro")
+    if (
+        mapper_numero is not None
+        and mapper_numero.confidence == "high"
+        and isinstance(mapper_numero.value, str)
+        and mapper_numero.value.strip()
+    ):
+        context.setdefault("obra", {})["numero_cadastro"] = mapper_numero.value
+
+    energia = context.setdefault("energia", {})
+    mapper_has_se = (mapper_context.get("energia") or {}).get("tem_subestacao") is True
+    if mapper_has_se and energia.get("tem_subestacao") is not True:
+        energia["tem_subestacao"] = True
+        adjustments.append(
+            {
+                "campo": "energia.tem_subestacao",
+                "acao": "subestacao_do_mapper",
+                "motivo": "mapper identificou a subestação na planta",
+            }
+        )
+    elif energia.get("tem_subestacao") is None:
+        energia["tem_subestacao"] = False
+        adjustments.append(
+            {
+                "campo": "energia.tem_subestacao",
+                "acao": "padrao_false",
+                "motivo": "subestação não identificada pela LLM nem pelo mapper",
+            }
+        )
+    return adjustments
+
+
+def extract_eletrico_canteiro_mapping_from_ingested_files(
+    files: list[IngestedFileMetadata],
+) -> tuple[MappingResult, ExtractionReport]:
+    extraction_result = extract_project_files(files)
+    mapper_mapping = map_extraction_to_partial_eletrico_canteiro_context(extraction_result)
+    cross_validation: dict[str, Any] | None = None
+
+    if is_llm_extraction_enabled():
+        llm_result = extract_eletrico_canteiro_with_llm_result(extraction_result.source_files)
+        llm_fields = sum(
+            1 for section in llm_result.context.values()
+            if isinstance(section, dict)
+            for v in section.values()
+            if v is not None
+        )
+        logger.info(
+            "Eletrico canteiro LLM primary extracted %d fields from %d files",
+            llm_fields,
+            len(files),
+        )
+        llm_context, adjustments = _clean_canteiro_llm_lists(
+            llm_result.context, mapper_mapping.context
+        )
+        final_context = _merge_canteiro_llm_with_mapper(llm_context, mapper_mapping.context)
+        adjustments += _apply_canteiro_mapper_authority(final_context, mapper_mapping)
+        cross_validation = llm_result.cross_validation
+        if adjustments:
+            # ExtractionReport nao tem campo de avisos; cross_validation ja carrega
+            # anotacoes extras (ex.: quantitative_*), entao os ajustes vao para la.
+            cross_validation = {
+                **(cross_validation or {}),
+                _CANTEIRO_ADJUSTMENTS_KEY: adjustments,
+            }
+    else:
+        final_context = _merge_canteiro_llm_with_mapper({}, mapper_mapping.context)
+
+    mapping = MappingResult(context=final_context, evidence=mapper_mapping.evidence)
+    report = assess_eletrico_canteiro_extraction_coverage(mapping)
+    report = _attach_cross_validation_report(report, cross_validation)
+    logger.info(
+        "Eletrico canteiro extraction coverage: filled=%d, missing=%d, pending=%d",
+        len(report.filled), len(report.missing), len(report.pending),
+    )
+    return mapping, report
+
+
 def extract_gas_natural_mapping_from_ingested_files(
     files: list[IngestedFileMetadata],
 ) -> tuple[MappingResult, ExtractionReport]:
@@ -979,6 +1194,45 @@ async def generate_memorial_eletrico_v1_from_uploaded_files(
     ingestion_result = await ingest_uploaded_files(files)
     try:
         return generate_memorial_eletrico_v1_from_ingested_files(
+            ingestion_result.files,
+            output_path,
+        )
+    finally:
+        cleanup_ingestion_result(ingestion_result)
+
+
+def generate_memorial_eletrico_canteiro_v1_from_ingested_files(
+    files: list[IngestedFileMetadata],
+    output_path: Path,
+) -> PipelineResult:
+    mapping, report = extract_eletrico_canteiro_mapping_from_ingested_files(files)
+
+    payload = deepcopy(mapping.context)
+    # Lista nao encontrada vira [] para a validacao apontar $.<lista> (minItems).
+    for list_key in _CANTEIRO_LIST_SECTIONS:
+        payload.setdefault(list_key, [])
+
+    try:
+        result = generate_memorial_eletrico_canteiro_v1(payload, output_path)
+        return PipelineResult(
+            context=result.context,
+            output_path=result.output_path,
+            extraction_report=report,
+        )
+    except MemorialValidationError as error:
+        raise MemorialValidationError(
+            issues=error.issues,
+            extraction_report=asdict(report),
+        ) from error
+
+
+async def generate_memorial_eletrico_canteiro_v1_from_uploaded_files(
+    files: list[UploadedFile],
+    output_path: Path,
+) -> PipelineResult:
+    ingestion_result = await ingest_uploaded_files(files)
+    try:
+        return generate_memorial_eletrico_canteiro_v1_from_ingested_files(
             ingestion_result.files,
             output_path,
         )
