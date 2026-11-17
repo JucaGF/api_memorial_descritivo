@@ -697,14 +697,22 @@ class EletricoCanteiroMapperTests(unittest.TestCase):
         self.assertIsNone(mt.get("secao_cabo_mm2"))
         self.assertIsNone(mt.get("diametro_eletroduto_pol"))
 
-    def test_canteiro_coverage_reports_equipamentos_and_mt_cabo_as_pending(self) -> None:
+    def test_canteiro_coverage_reports_equipamentos_as_pending(self) -> None:
         report = assess_eletrico_canteiro_extraction_coverage(self.result)
         for path in ("quadros", "energia.potencia_transformador_kva", "aterramento.qtd_hastes"):
             self.assertIn(path, report.filled)
-        for path in ("equipamentos", "mt.secao_cabo_mm2", "mt.diametro_eletroduto_pol"):
-            self.assertIn(path, report.pending)
-            self.assertNotIn(path, report.filled)
+        self.assertIn("equipamentos", report.pending)
+        self.assertNotIn("equipamentos", report.filled)
         self.assertEqual(report.missing, [])
+
+    def test_canteiro_coverage_does_not_flag_absent_mt_as_pending(self) -> None:
+        # MT vazio e o caso normal (SE aerea sem MT rotulado): o paragrafo sai do
+        # texto. Marcar como pendente faz o painel de revisao pedir um valor que
+        # nao existe na planta.
+        report = assess_eletrico_canteiro_extraction_coverage(self.result)
+        for path in ("mt.secao_cabo_mm2", "mt.diametro_eletroduto_pol"):
+            self.assertNotIn(path, report.pending)
+            self.assertNotIn(path, report.missing)
 
     def test_canteiro_mapper_dedupes_quadros_by_normalized_name(self) -> None:
         ctx = map_extraction_to_partial_eletrico_canteiro_context(

@@ -2459,7 +2459,7 @@ class EletricoCanteiroFromFilesTests(unittest.TestCase):
 
     @patch("app.services.pipeline_from_files.extract_eletrico_canteiro_with_llm_result")
     @patch("app.services.pipeline_from_files.extract_project_files")
-    def test_canteiro_from_files_generates_docx_without_mt_and_reports_mt_pending(
+    def test_canteiro_from_files_generates_docx_without_mt_and_does_not_flag_mt(
         self,
         extract_files_mock,
         llm_mock,
@@ -2481,8 +2481,9 @@ class EletricoCanteiroFromFilesTests(unittest.TestCase):
         self.assertEqual(result.context["mt"]["tensao_kv"], 13.8)
         self.assertIsNone(result.context["mt"]["secao_cabo_mm2"])
         self.assertIsNone(result.context["mt"]["diametro_eletroduto_pol"])
-        self.assertIn("mt.secao_cabo_mm2", result.extraction_report.pending)
-        self.assertIn("mt.diametro_eletroduto_pol", result.extraction_report.pending)
+        for path in ("mt.secao_cabo_mm2", "mt.diametro_eletroduto_pol"):
+            self.assertNotIn(path, result.extraction_report.pending)
+            self.assertNotIn(path, result.extraction_report.missing)
         self.assertEqual(result.extraction_report.cross_validation, {"fallback_used": False})
         self.assertEqual(len(result.context["quadros"]), 6)
 
