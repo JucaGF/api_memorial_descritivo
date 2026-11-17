@@ -1,6 +1,7 @@
 """
 Acceptance: real from-files pipeline (eletrico-canteiro v1) on the Bothanic drawings,
-compared with tests/fixtures/eletrico_canteiro_bothanic_expected.json.
+compared with tests/fixtures/eletrico_canteiro_bothanic_expected.json, plus checks on
+the rendered DOCX text (full substation phrase, no "None", no "75.0 kVA" / "50.0 mm²").
 
 Run with the LLM on (needs OPENAI_API_KEY; model from OPENAI_MODEL):
   APP_ENV=local USE_LLM_EXTRACTION=true python scripts/acceptance_canteiro_bothanic.py
@@ -28,6 +29,8 @@ sys.path.insert(0, str(ROOT))
 
 from starlette.datastructures import Headers, UploadFile  # noqa: E402
 
+from app.services.context_builder import normalize_quadro_key  # noqa: E402
+from app.services.memorial_renderer import inspect_docx_text  # noqa: E402
 from app.services.memorial_validator import MemorialValidationError  # noqa: E402
 from app.services.pipeline_from_files import (  # noqa: E402
     generate_memorial_eletrico_canteiro_v1_from_uploaded_files,
@@ -57,6 +60,7 @@ def compare(expected: dict[str, Any], context: dict[str, Any]) -> list[str]:
     divergences: list[str] = []
 
     for path in (
+        "obra.numero_cadastro",
         "obra.construtora",
         "energia.potencia_transformador_kva",
         "aterramento.qtd_hastes",
@@ -64,6 +68,13 @@ def compare(expected: dict[str, Any], context: dict[str, Any]) -> list[str]:
         want, got = _get(expected, path), _get(context, path)
         if want != got:
             divergences.append(f"{path}: esperado {want!r}, obtido {got!r}")
+
+    # nome/localizacao: o texto do carimbo pode vir com outra formatacao que a
+    # do fixture; exige so que estejam preenchidos (os valores sao impressos).
+    for path in ("obra.nome", "obra.localizacao"):
+        got = _get(context, path)
+        if not isinstance(got, str) or not got.strip():
+            divergences.append(f"{path}: vazio (obtido {got!r})")
 
     if _get(context, "mt.tensao_kv") != 13.8:
         divergences.append(
@@ -74,12 +85,12 @@ def compare(expected: dict[str, Any], context: dict[str, Any]) -> list[str]:
             divergences.append(f"{path}: esperado None, obtido {_get(context, path)!r}")
 
     got_quadros = {
-        _norm(q.get("nome")): q.get("carga_w")
+        normalize_quadro_key(q.get("nome")): q.get("carga_w")
         for q in (context.get("quadros") or [])
         if isinstance(q, dict)
     }
     for quadro in expected.get("quadros", []):
-        key = _norm(quadro["nome"])
+        key = normalize_quadro_key(quadro["nome"])
         if key not in got_quadros:
             divergences.append(f"quadros: '{quadro['nome']}' ausente")
         elif got_quadros[key] != quadro["carga_w"]:
@@ -97,6 +108,16 @@ def compare(expected: dict[str, Any], context: dict[str, Any]) -> list[str]:
         if _norm(equip["nome"]) not in got_equip:
             divergences.append(f"equipamentos: '{equip['nome']}' ausente")
 
+    return divergences
+
+
+def compare_docx_text(text: str) -> list[str]:
+    divergences: list[str] = []
+    if "subestação aérea" not in text:
+        divergences.append("docx: texto sem 'subestação aérea'")
+    for forbidden in ("None", ".0 kVA", ".0 mm²"):
+        if forbidden in text:
+            divergences.append(f"docx: texto contem {forbidden!r}")
     return divergences
 
 
@@ -156,8 +177,13 @@ def main() -> int:
 
     print(f"DOCX gerado: {result.output_path}")
     _print_report(result.extraction_report)
+    obra = result.context.get("obra") or {}
+    print(f"obra.nome: {obra.get('nome')!r}")
+    print(f"obra.localizacao: {obra.get('localizacao')!r}")
+    print(f"obra.numero_cadastro: {obra.get('numero_cadastro')!r}")
 
     divergences = compare(expected, result.context)
+    divergences += compare_docx_text(inspect_docx_text(Path(result.output_path)))
     if divergences:
         print(f"\n{len(divergences)} divergencia(s):")
         for d in divergences:
