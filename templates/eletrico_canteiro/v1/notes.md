@@ -24,3 +24,9 @@ Sem default (variam por obra): eletroduto e cabo de MT.
 
 ## Quadros
 `quadros[].carga_formatada` e `descricao` são preenchidos pelo builder (`QUADRO_DESCRICOES_CONHECIDAS`); o mapper entrega só `nome` e `carga_w`.
+
+## Template
+- `template.docx` foi gerado a partir de uma cópia de `templates/eletrico/v1/template.docx` (python-docx), com o texto-alvo do memorial de exemplo sem as anotações do editor.
+- Cada tag Jinja fica num único run; cada `{%p ... %}` fica no próprio parágrafo (há teste que confere).
+- Sumário estático. Os números de página são estimativas (não havia Word/LibreOffice para paginar) e as entradas comuns aos dois ramos usam a paginação do caso com subestação. Conferir no Word ao mexer no texto.
+- O renderer do canteiro usa `autoescape=True`: valores com `&` (ex.: "MOREIRA & RUFFO'S LTDA") saem corretos.
