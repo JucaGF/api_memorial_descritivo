@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 from pathlib import Path
 
@@ -721,6 +722,23 @@ class EletricoCanteiroMapperTests(unittest.TestCase):
             build_extraction_result("Texto sem dados de canteiro.")
         ).context
         self.assertNotIn("quadros", ctx)
+
+    def test_canteiro_quadro_regex_is_linear_on_adversarial_text(self) -> None:
+        adversarial = "Q.D. " * 40000
+        started = time.perf_counter()
+        ctx = map_extraction_to_partial_eletrico_canteiro_context(
+            build_extraction_result(adversarial)
+        ).context
+        elapsed = time.perf_counter() - started
+        self.assertNotIn("quadros", ctx)
+        self.assertLess(elapsed, 1.0)
+
+    def test_canteiro_quadro_regex_accepts_40_char_name(self) -> None:
+        nome = "Q.D." + "A" * 40
+        ctx = map_extraction_to_partial_eletrico_canteiro_context(
+            build_extraction_result(f"{nome} = 1.000 W")
+        ).context
+        self.assertEqual(ctx["quadros"], [{"nome": nome, "carga_w": 1000}])
 
 
 if __name__ == "__main__":

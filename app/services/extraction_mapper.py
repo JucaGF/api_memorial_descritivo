@@ -1395,8 +1395,9 @@ CANTEIRO_PENDING_EXTRACTION = [
 _CANTEIRO_SE_RE = re.compile(r"SE\s+A[ÉE]REA\s+(\d+(?:[.,]\d+)?)\s*KVA", re.IGNORECASE)
 _CANTEIRO_HASTES_RE = re.compile(r"M[ÍI]NIMA:\s*(\d+)\s+HASTES", re.IGNORECASE)
 _CANTEIRO_CABO_MALHA_RE = re.compile(r"#\s*(\d+)\s*mm².{0,40}aterramento", re.IGNORECASE)
+# Nome com tamanho limitado: sem limite, cada "Q.D." varre o resto do texto (tempo quadrático).
 _CANTEIRO_QUADRO_RE = re.compile(
-    r"(Q\.G\.B\.T\.|Q\.D\.\s*[A-ZÀ-Ú/][A-ZÀ-Ú/ .]*?)\s*=\s*"
+    r"(Q\.G\.B\.T\.|Q\.D\.\s{0,3}[A-ZÀ-Ú/][A-ZÀ-Ú/ .]{0,40}?)\s{0,5}=\s{0,5}"
     r"(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*W"
 )
 
