@@ -394,6 +394,46 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["files"][1]["extension"], ".docx")
         self.assertEqual(body["files"][0]["filename"], "projeto.pdf")
 
+    def test_post_memorial_eletrico_canteiro_returns_docx_for_valid_payload(self) -> None:
+        payload = load_fixture("eletrico_canteiro_bothanic_expected.json")
+
+        response = self.client.post("/api/v1/memoriais/eletrico-canteiro", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertIn(
+            "memorial_eletrico_canteiro_v1.docx",
+            response.headers["content-disposition"],
+        )
+        self.assertTrue(response.content.startswith(b"PK"))
+
+    def test_post_memorial_eletrico_canteiro_returns_400_with_canteiro_message(self) -> None:
+        payload = load_fixture("eletrico_canteiro_bothanic_expected.json")
+        del payload["obra"]
+
+        response = self.client.post("/api/v1/memoriais/eletrico-canteiro", json=payload)
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(
+            body["detail"],
+            "Payload invalido para o memorial eletrico canteiro v1.",
+        )
+        self.assertTrue(body["errors"])
+
+    def test_post_memorial_eletrico_canteiro_upload_returns_metadata_for_valid_files(self) -> None:
+        files = [("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf"))]
+
+        response = self.client.post("/api/v1/memoriais/eletrico-canteiro/upload", files=files)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body["files"]), 1)
+        self.assertEqual(body["files"][0]["extension"], ".pdf")
+
     def test_post_memorial_gas_natural_upload_returns_metadata_for_valid_files(self) -> None:
         files = [
             ("files", ("projeto.pdf", b"%PDF-1.4 teste", "application/pdf")),
