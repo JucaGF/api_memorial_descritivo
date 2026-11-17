@@ -128,6 +128,39 @@ class TelecomLLMExtraction(BaseModel):
     observacoes: str | None = None
 
 
+class CanteiroObraExtraction(BaseModel):
+    construtora: str | None = None
+    nome: str | None = None
+    localizacao: str | None = None
+    numero_cadastro: str | None = None
+
+
+class CanteiroAterramentoExtraction(BaseModel):
+    qtd_hastes: int | None = None
+    secao_cabo_cobre_mm2: float | None = None
+
+
+class EquipamentoExtraction(BaseModel):
+    nome: str | None = None
+    potencia: str | None = None
+    qtd: int | None = None
+
+
+class QuadroExtraction(BaseModel):
+    nome: str | None = None
+    carga_w: float | None = None
+
+
+class EletricoCanteiroLLMExtraction(BaseModel):
+    obra: CanteiroObraExtraction = CanteiroObraExtraction()
+    energia: EnergiaExtraction = EnergiaExtraction()
+    mt: MTExtraction = MTExtraction()
+    aterramento: CanteiroAterramentoExtraction = CanteiroAterramentoExtraction()
+    equipamentos: list[EquipamentoExtraction] = []
+    quadros: list[QuadroExtraction] = []
+    observacoes: str | None = None
+
+
 class CRMExtraction(BaseModel):
     pavimento: str | None = None
 
@@ -602,6 +635,92 @@ for dimensionamento and pontos_utilizacao, line / detail legends for diametros.
 Per-file extractions:
 """
 
+ELETRICO_CANTEIRO_EXTRACTION_PROMPT = """\
+You are an expert structured data extractor for Brazilian electrical engineering projects.
+
+You will receive page images and/or OCR text from a CONSTRUCTION SITE (canteiro de obras) temporary \
+electrical installation plan. This is NOT a building electrical project: there are no apartments, \
+stores or building grounding. The images are the PRIMARY source of truth; OCR text only confirms or \
+complements what is visible.
+
+Extract ONLY the fields of the canteiro electrical memorial v1 contract.
+
+## Where to look for each field
+
+### obra
+Read the TITLE BLOCK (carimbo): CONSTRUTOR -> construtora, EDIFÍCIO -> nome, LOCAL -> localizacao, \
+and the project/process number -> numero_cadastro.
+
+### energia (substation)
+- Look for the label "SE AÉREA nnKVA" (pole-mounted aerial substation), for example "SE AÉREA 75KVA".
+- tem_subestacao: true when such a substation is drawn; tipo_subestacao: "aérea" for "SE AÉREA"; \
+potencia_transformador_kva: the number from the label (75).
+- tap_descricao and tensao_secundaria: only if the drawing explicitly states them; otherwise null.
+
+### mt (medium voltage)
+- Fill eletroduto/cable fields ONLY when the drawing explicitly labels them as MEDIUM VOLTAGE \
+(MT, 15 kV, 8,7/15 kV, "ramal de entrada" in MT).
+- NEVER use low-voltage cables (0,6/1 kV, 1 kV, XLPE/EPR 90 C feeders such as "3X1X50+25mm2(N)+50(T)mm2") \
+as MT data. A BT feeder from the substation to the Q.G.B.T. is NOT an MT cable.
+- When there is no explicit MT label, return null for diametro_eletroduto_pol, tipo_cabo, \
+temperatura_cabo, classe_isolacao and secao_cabo_mm2.
+- tensao_kv: only if the drawing states the MT voltage; otherwise null (never assume 13,8).
+
+### aterramento
+- qtd_hastes: number of ground rods (hastes) of the site grounding mesh, if stated.
+- secao_cabo_cobre_mm2: bare copper cable cross-section of the grounding mesh, if stated.
+- Do NOT extract the grounding system type (TN-S/TT) and ignore the "TT" or other letters that \
+appear only in the symbols legend.
+
+### quadros (electrical panels)
+- The panels are the single-line diagrams titled "Q.G.B.T." and "Q.D.*" (for example Q.D.L/T TORRE, \
+Q.D.STAND, Q.D.APOIO, Q.D.ELEV. CREMALHEIRA, Q.D.MÓVEL).
+- nome: the panel name exactly as written on the drawing.
+- carga_w: the total load of that panel in watts, from the "= nn.nnn W" annotation. Brazilian numbers \
+use "." as the thousands separator: "89.088 W" is 89088 and "9.170 W" is 9170. Return a plain number.
+- List each panel ONCE even if the same diagram is repeated on several sheets.
+
+### equipamentos (site machinery)
+- Machines labeled on the plan: betoneira, policorte, bancada de serra, peneira, esmeril, \
+guincho / mini guincho, elevador cremalheira, grua, vibrador, bombas.
+- nome: human-readable name as in a memorial, capitalized ("Betoneira", "Policorte", \
+"Bancada de serra", "Peneira", "Esmeril", "Mini guincho", "Elevador cremalheira").
+- potencia: EXACTLY as labeled, with unit, using the format "7,5 CV" (from "Betoneira (7,5CV)"); \
+null when the machine has no power label.
+- qtd: one unit per symbol drawn on the plan. If the same machine appears with the same label in \
+several symbols, count each symbol; do not count the same symbol repeated in a legend or schedule.
+
+## Rules
+- Extract ONLY from evidence visible in the images or OCR text.
+- Return null (or an empty list) for any field without sufficient evidence. NEVER invent values.
+- NEVER extract apartments, stores, restaurants, BEP, building grounding (malha no subsolo / SPDA) \
+or generators: they do not exist in a construction site plan.
+- IGNORE the symbols legend (legenda) and the generic notes: they list symbol types, not installed items.
+- Numeric fields must be numbers, not strings; potencia is a string.
+- In observacoes, briefly note ambiguities or extraction limitations.
+"""
+
+ELETRICO_CANTEIRO_MERGE_PROMPT = """\
+You are merging structured extractions from multiple files (sheets) of the SAME construction site \
+(canteiro de obras) electrical project.
+
+Your task: produce a SINGLE unified extraction for the canteiro electrical memorial context.
+
+Rules:
+- obra comes from the title block; prefer the most complete value.
+- quadros: deduplicate by panel name. The same diagram repeated across sheets is ONE panel, not several. \
+When the same panel has different carga_w, prefer the value from the sheet with the diagram itself.
+- equipamentos: the same physical machine shown on several sheets is counted once; do not add \
+quantities of the same symbol seen in two sheets. Keep potencia exactly as labeled.
+- mt: keep a value only if some file stated it as an explicit medium-voltage label. NEVER promote a \
+0,6/1 kV low-voltage cable to MT; otherwise null.
+- When only one file provides a field, use that value. Return null (or an empty list) only when NO file \
+provided a value.
+- In observacoes, note any conflicts you resolved and which file you preferred.
+
+Per-file extractions:
+"""
+
 GENERIC_CROSS_VALIDATION_PROMPT = """\
 You are performing cross-validation for structured memorial extraction candidates from the SAME project.
 
@@ -949,6 +1068,49 @@ def _extract_single_file(
     return response.output_parsed.model_dump(mode="json")
 
 
+def _build_eletrico_canteiro_vision_input(source_file: ExtractedSourceFile) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [
+        {"type": "input_text", "text": ELETRICO_CANTEIRO_EXTRACTION_PROMPT},
+    ]
+    for page_image in source_file.page_images:
+        content.append({
+            "type": "input_image",
+            "image_url": page_image,
+            "detail": "original",
+        })
+    if source_file.extracted_text.strip():
+        content.append({
+            "type": "input_text",
+            "text": f"Supplementary OCR text from {source_file.original_filename}:\n"
+                    f"{source_file.extracted_text}",
+        })
+    return [{"role": "user", "content": content}]
+
+
+def _build_eletrico_canteiro_text_only_input(
+    source_file: ExtractedSourceFile,
+) -> list[dict[str, Any]]:
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": ELETRICO_CANTEIRO_EXTRACTION_PROMPT},
+        {
+            "type": "input_text",
+            "text": f"=== FILE: {source_file.original_filename} ===\n"
+                    f"{source_file.extracted_text}",
+        },
+    ]}]
+
+
+def _build_eletrico_canteiro_merge_input(
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    sections = []
+    for filename, extraction in per_file_results:
+        sections.append(f"=== {filename} ===\n{json.dumps(extraction, ensure_ascii=False, indent=2)}")
+    return [{"role": "user", "content": [
+        {"type": "input_text", "text": ELETRICO_CANTEIRO_MERGE_PROMPT + "\n\n".join(sections)},
+    ]}]
+
+
 def _extract_telecom_single_file(
     client: Any,
     model: str,
@@ -969,6 +1131,46 @@ def _extract_telecom_single_file(
         kwargs["reasoning"] = {"effort": "high"}
 
     response = client.responses.parse(**kwargs)
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _extract_eletrico_canteiro_single_file(
+    client: Any,
+    model: str,
+    source_file: ExtractedSourceFile,
+) -> dict[str, Any]:
+    has_images = bool(source_file.page_images)
+    input_messages = (
+        _build_eletrico_canteiro_vision_input(source_file) if has_images
+        else _build_eletrico_canteiro_text_only_input(source_file)
+    )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": input_messages,
+        "text_format": EletricoCanteiroLLMExtraction,
+    }
+    if has_images:
+        kwargs["reasoning"] = {"effort": "high"}
+
+    response = client.responses.parse(**kwargs)
+    if response.output_parsed is None:
+        return {}
+    return response.output_parsed.model_dump(mode="json")
+
+
+def _merge_eletrico_canteiro_with_llm(
+    client: Any,
+    model: str,
+    per_file_results: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    response = client.responses.parse(
+        model=model,
+        input=_build_eletrico_canteiro_merge_input(per_file_results),
+        text_format=EletricoCanteiroLLMExtraction,
+    )
     if response.output_parsed is None:
         return {}
     return response.output_parsed.model_dump(mode="json")
@@ -1676,6 +1878,19 @@ ELETRICO_STRATEGY = ExtractionStrategy(
     batch_merger=_merge_with_llm,
 )
 
+ELETRICO_CANTEIRO_STRATEGY = ExtractionStrategy(
+    name="Eletrico canteiro",
+    cross_validation_intro=(
+        "Return the final construction-site electrical memorial extraction using only candidate "
+        "values. Prefer the title block for obra, the 'SE AÉREA' label for energia, the panel "
+        "diagrams for quadros, and labeled machine symbols for equipamentos. Leave mt null "
+        "unless a candidate is explicitly labeled as medium voltage."
+    ),
+    text_format=EletricoCanteiroLLMExtraction,
+    single_file_extractor=_extract_eletrico_canteiro_single_file,
+    batch_merger=_merge_eletrico_canteiro_with_llm,
+)
+
 TELECOM_STRATEGY = ExtractionStrategy(
     name="Telecom",
     cross_validation_intro=(
@@ -1734,6 +1949,15 @@ def extract_with_llm_result(source_files: list[ExtractedSourceFile]) -> LLMExtra
 def extract_with_llm(source_files: list[ExtractedSourceFile]) -> dict[str, Any]:
     """Vision-first extraction: send page images + text to GPT for structured extraction."""
     return extract_with_llm_result(source_files).context
+
+
+def extract_eletrico_canteiro_with_llm_result(
+    source_files: list[ExtractedSourceFile],
+) -> LLMExtractionRunResult:
+    if not is_llm_extraction_enabled():
+        logger.debug("Eletrico canteiro LLM extraction disabled, skipping")
+        return LLMExtractionRunResult(context={})
+    return _run_llm_extraction(source_files, ELETRICO_CANTEIRO_STRATEGY)
 
 
 def extract_telecom_with_llm_result(
