@@ -4,14 +4,20 @@ import json
 from pathlib import Path
 import unittest
 
-from app.services.context_builder import build_memorial_eletrico_v1_context
+from app.services.context_builder import (
+    build_memorial_eletrico_canteiro_v1_context,
+    build_memorial_eletrico_v1_context,
+)
 from app.services.memorial_validator import (
     MemorialValidationError,
+    ELETRICO_CANTEIRO_V1_SCHEMA_PATH,
+    load_eletrico_canteiro_v1_schema,
     load_eletrico_v1_schema,
     load_gas_natural_v1_schema,
     load_glp_v1_schema,
     load_glp_v2_schema,
     load_telecom_v1_schema,
+    validate_memorial_eletrico_canteiro_v1_context,
     validate_memorial_eletrico_v1_context,
     validate_memorial_gas_natural_v1_context,
     validate_memorial_glp_v1_context,
@@ -25,6 +31,7 @@ FIXTURE_PATH = ROOT / "tests" / "fixtures" / "eletrico_sem_subestacao.json"
 TELECOM_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "telecom_base.json"
 GAS_NATURAL_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "gas_natural_base.json"
 GLP_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "glp_base.json"
+CANTEIRO_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "eletrico_canteiro_bothanic_expected.json"
 
 
 def load_fixture() -> dict:
@@ -44,6 +51,11 @@ def load_gas_natural_fixture() -> dict:
 
 def load_glp_fixture() -> dict:
     with GLP_FIXTURE_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def load_bothanic_fixture() -> dict:
+    with CANTEIRO_FIXTURE_PATH.open("r", encoding="utf-8") as file:
         return json.load(file)
 
 
@@ -336,6 +348,65 @@ class MemorialValidatorTests(unittest.TestCase):
 
         self.assertEqual(built["mt"], {})
         validate_memorial_eletrico_v1_context(built)
+
+    def test_load_eletrico_canteiro_v1_schema_returns_expected_contract(self) -> None:
+        schema = load_eletrico_canteiro_v1_schema()
+
+        self.assertTrue(ELETRICO_CANTEIRO_V1_SCHEMA_PATH.exists())
+        self.assertEqual(schema["title"], "MemorialEletricoCanteiroContextV1")
+        for section in ("gerador", "nao_inclusos", "instalacao"):
+            self.assertNotIn(section, schema["properties"])
+
+    def test_validate_eletrico_canteiro_accepts_bothanic_fixture(self) -> None:
+        context = build_memorial_eletrico_canteiro_v1_context(load_bothanic_fixture())
+        validate_memorial_eletrico_canteiro_v1_context(context)
+
+    def test_validate_eletrico_canteiro_rejects_building_fields(self) -> None:
+        payload = load_bothanic_fixture()
+        payload["obra"]["qtd_apartamentos"] = 30
+        with self.assertRaises(MemorialValidationError):
+            validate_memorial_eletrico_canteiro_v1_context(
+                build_memorial_eletrico_canteiro_v1_context(payload)
+            )
+
+    def test_validate_eletrico_canteiro_rejects_empty_quadros_and_equipamentos(self) -> None:
+        payload = load_bothanic_fixture()
+        payload["quadros"] = []
+        payload["equipamentos"] = []
+        with self.assertRaises(MemorialValidationError) as ctx:
+            validate_memorial_eletrico_canteiro_v1_context(
+                build_memorial_eletrico_canteiro_v1_context(payload)
+            )
+        paths = {issue.path for issue in ctx.exception.issues}
+        self.assertIn("$.quadros", paths)
+        self.assertIn("$.equipamentos", paths)
+
+    def test_validate_eletrico_canteiro_rejects_bep_fields_in_aterramento(self) -> None:
+        payload = load_bothanic_fixture()
+        payload["aterramento"]["local_bep"] = "subsolo"
+        with self.assertRaises(MemorialValidationError):
+            validate_memorial_eletrico_canteiro_v1_context(
+                build_memorial_eletrico_canteiro_v1_context(payload)
+            )
+
+    def test_validate_eletrico_canteiro_requires_substation_fields_when_present(self) -> None:
+        payload = load_bothanic_fixture()
+        payload["energia"].pop("tipo_subestacao")
+        with self.assertRaises(MemorialValidationError):
+            validate_memorial_eletrico_canteiro_v1_context(
+                build_memorial_eletrico_canteiro_v1_context(payload)
+            )
+
+    def test_validate_eletrico_canteiro_accepts_equipment_without_potencia(self) -> None:
+        context = build_memorial_eletrico_canteiro_v1_context(load_bothanic_fixture())
+        self.assertIsNone(context["equipamentos"][5]["potencia"])
+        validate_memorial_eletrico_canteiro_v1_context(context)
+
+    def test_validate_eletrico_canteiro_accepts_without_subestacao(self) -> None:
+        payload = load_bothanic_fixture()
+        payload["energia"] = {"tem_subestacao": False}
+        context = build_memorial_eletrico_canteiro_v1_context(payload)
+        validate_memorial_eletrico_canteiro_v1_context(context)
 
 
 if __name__ == "__main__":
