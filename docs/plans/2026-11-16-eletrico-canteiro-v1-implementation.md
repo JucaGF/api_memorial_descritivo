@@ -11,7 +11,7 @@
 **Spec:** este plano é a spec. Fontes:
 - memorial de exemplo do engenheiro: `MEMO ELÉTRICO CANTEIRO DE OBRA_14-11-2026.doc` (MAKAI, com anotações "Fixo"/"Variável"/"Muda conforme cadastro");
 - plantas reais: `01_` e `02_CANTEIRO OBRA BOTHANIC_V05_03-11-2026-Engpred.pdf`;
-- decisões do engenheiro em 16/11/2026, nas respostas 1 a 5 abaixo;
+- decisões do engenheiro em 16/11/2026 (respostas 1 a 5) e 17/11/2026 (respostas 6 a 11), abaixo;
 - avaliação de `docs/plans/2026-04-10-gas-natural-v1-implementation.md`, que é o molde, com 5 ajustes.
 
 ## Decisões do engenheiro (16/11/2026)
@@ -22,20 +22,29 @@
 4. **BEP / malha no subsolo / SPDA da edificação:** não se aplicam ao canteiro. Remover do texto de proteção contra choques.
 5. **Tensão de MT** quando a planta não informar: **13,8 kV**.
 
-## Valores assumidos do memorial de exemplo (confirmar com o engenheiro antes do merge)
+## Respostas do engenheiro às pendências (17/11/2026)
 
-Vêm do texto do exemplo e entram como default no `context_builder`. São trocáveis sem mexer no código além da constante:
+6. **Eletroduto e cabo de MT mudam de obra para obra.** Não têm default: são extraídos da planta quando ela os informa e, quando não informa, os parágrafos correspondentes saem do documento. Nas plantas do Bothanic **não há** eletroduto nem cabo de MT. A SE é aérea, num poste, e os únicos cabos XLPE/EPR são de BT 0,6/1 kV, como o alimentador `3X1X50+25mm²(N)+50(T)mm²`. O texto do exemplo ("ramal subterrâneo", "35mm² Variável conforme subestação") descreve outra configuração.
+7. **Taps, tensão secundária e TN-S são fixos** (tabela abaixo).
+8. **Texto da malha do canteiro: aprovado** (abaixo).
+9. **Quadros:** os nomes seguem os da planta. Nova descrição do Quadro da Torre: "circuitos de iluminação e tomada para uso durante a execução da obra". O Q.D.ELEV. CREMALHEIRA continua sem descrição e aparece só com o nome e a carga, como já acontece no exemplo.
+10. **Equipamento sem potência:** só nome e quantidade (Review Focus 4).
+11. **Plantas do Bothanic podem entrar no repositório** (Task 7).
 
-| Campo | Default | Origem no exemplo |
-|---|---|---|
-| `mt.diametro_eletroduto_pol` | `4` | "eletroduto de aço galvanizado… bitola de 4”" |
-| `mt.secao_cabo_mm2` | `35` | "cabos EPR/XLPE… 8,7/15KV, secção 35mm²" |
-| `mt.tipo_cabo` / `mt.temperatura_cabo` / `mt.classe_isolacao` | `"EPR/XLPE"` / `90` / `"8,7/15"` | idem |
-| `energia.tap_descricao` | `"Tap 1 – 13.800 V; Tap 2 – 13.200 V; Tap 3 – 12.600 V; Tap 4 – 12.000 V; Tap 5 – 11.400 V."` | seção da subestação |
-| `energia.tensao_secundaria` | `"380 V entre fases e 220 V entre fases e neutro"` | idem |
-| `aterramento.tipo_sistema` | `"TN-S"` | seção de proteção contra choques |
+## Valores fixos confirmados (17/11)
 
-**Texto novo do item de proteção contra choques** (substitui o parágrafo do BEP, decisão 4; o engenheiro precisa aprovar a redação):
+Entram como default no `context_builder`, via `CANTEIRO_DEFAULTS`:
+
+| Campo | Default |
+|---|---|
+| `energia.tap_descricao` | `"Tap 1 – 13.800 V; Tap 2 – 13.200 V; Tap 3 – 12.600 V; Tap 4 – 12.000 V; Tap 5 – 11.400 V."` |
+| `energia.tensao_secundaria` | `"380 V entre fases e 220 V entre fases e neutro"` |
+| `aterramento.tipo_sistema` | `"TN-S"` |
+| `mt.tensao_kv` | `13.8` (decisão 5) |
+
+**Sem default (variam por obra, decisão 6):** `mt.diametro_eletroduto_pol`, `mt.secao_cabo_mm2`, `mt.tipo_cabo`, `mt.temperatura_cabo` e `mt.classe_isolacao`.
+
+**Texto novo do item de proteção contra choques** (substitui o parágrafo do BEP, decisão 4; aprovado em 17/11):
 
 > Os condutores terra dos quadros de distribuição do canteiro deverão ser conectados à malha de aterramento do canteiro, composta de {{ aterramento.qtd_hastes }} hastes do tipo copperweld de 5/8"x2.400mm, interligadas por cabo de cobre nu de {{ aterramento.secao_cabo_cobre_mm2 }} mm² através de conector GTDU ou solda exotérmica. O número de hastes poderá ser ampliado até que a resistência da malha não ultrapasse 10 ohms em qualquer época do ano.
 
@@ -59,6 +68,7 @@ Vêm do texto do exemplo e entram como default no `context_builder`. São trocá
 3. **Símbolo de legenda confundido com dado.** A regra de aterramento do elétrico lê "TT" da legenda como sistema TT. O canteiro não pode herdar isso e deve ficar com o default TN-S. Teste: `test_canteiro_mapper_does_not_infer_tipo_sistema_from_legend` (Task 4).
 4. **Equipamento sem potência** (mini guincho, elevador cremalheira). O documento não pode mostrar "None" nem "()". Teste: `test_render_canteiro_equipment_without_potencia_has_no_placeholder_text` (Task 2).
 5. **Canteiro sem subestação.** A seção 4.2 some e o sumário renumera, sem buracos. Teste: `test_render_canteiro_without_subestacao_omits_section_and_renumbers` (Task 2).
+6. **Cabo de BT confundido com cabo de MT.** O alimentador de BT de 50 mm² do Bothanic não pode virar `mt.secao_cabo_mm2`. O esperado é o campo ausente e os parágrafos de MT fora do documento, sem "None". Testes: `test_canteiro_mapper_does_not_take_bt_feeder_as_mt_cable` (Task 4) e `test_render_canteiro_without_mt_cabo_omits_mt_paragraphs` (Task 2).
 
 ---
 
@@ -84,7 +94,7 @@ Vêm do texto do exemplo e entram como default no `context_builder`. São trocá
 - `documento.data_atual`: string, obrigatório.
 - `obra`: `numero_cadastro`, `construtora`, `nome` e `localizacao` (strings) obrigatórios; `porcentagem_entre_trafos` e `porcentagem_entre_quadros` (strings) obrigatórios. **Sem** os campos do prédio (decisão 1).
 - `energia`: igual ao elétrico (`tem_subestacao` obrigatório e o `allOf` if/then copiado de `templates/eletrico/v1/schema.json`).
-- `mt`: `tensao_kv`, `diametro_eletroduto_pol` e `secao_cabo_mm2` (number) obrigatórios; `tipo_cabo`, `temperatura_cabo` e `classe_isolacao` são opcionais e anuláveis.
+- `mt`: `tensao_kv` (number) obrigatório. `diametro_eletroduto_pol` e `secao_cabo_mm2` (number), mais `tipo_cabo`, `temperatura_cabo` e `classe_isolacao`, são opcionais e anuláveis (decisão 6).
 - `aterramento`: `tipo_sistema` (enum `TN-S`/`TN-C`/`TN-C-S`/`TT`/`IT`), `qtd_hastes` (integer ≥ 1) e `secao_cabo_cobre_mm2` (number > 0), todos obrigatórios. **Sem** `secao_cabo_malha_mm2` e sem `local_bep` (decisão 4).
 - `equipamentos`: array com `minItems: 1`. Cada item tem `nome` (string, `minLength: 1`), `potencia` (string ou null, por exemplo `"7,5 CV"`) e `qtd` (integer ≥ 1).
 - `quadros`: array com `minItems: 1`. Cada item tem `nome` (string, `minLength: 1`), `carga_w` (number > 0), `carga_formatada` (string, preenchida pelo builder) e `descricao` (string ou null).
@@ -93,6 +103,7 @@ Vêm do texto do exemplo e entram como default no `context_builder`. São trocá
 **Fixture `eletrico_canteiro_bothanic_expected.json`:** valores reais tirados das plantas V05. Ela é o oráculo das Tasks 4 e 7:
 - `obra`: construtora `"MOREIRA & RUFFO'S LTDA"`, nome `"BOTHANIC"`, localização `"R. Manuel Cavalcanti de Souza esq. c/ a Av. Adolfo Loureiro, S/N, Cabo Branco, João Pessoa - PB"`, numero_cadastro `"46/2024"`.
 - `energia`: `tem_subestacao: true`, `tipo_subestacao: "subestação aérea abaixadora"`, `potencia_transformador_kva: 75`.
+- `mt`: `tensao_kv: 13.8`; `diametro_eletroduto_pol`, `secao_cabo_mm2`, `tipo_cabo`, `temperatura_cabo` e `classe_isolacao` todos `null`, porque a planta não os informa.
 - `aterramento`: `qtd_hastes: 3`, `secao_cabo_cobre_mm2: 50`.
 - `quadros`, em ordem de aparição: `Q.G.B.T.` 89088, `Q.D.L/T TORRE` 12714, `Q.D.STAND` 9170, `Q.D.APOIO` 33837, `Q.D.ELEV. CREMALHEIRA` 13800, `Q.D.MÓVEL` 3851.
 - `equipamentos`, conforme o rótulo de potência na planta: `Betoneira` `"7,5 CV"`, `Policorte` `"3 CV"`, `Bancada de serra` `"5 CV"`, `Peneira` `"1 CV"`, `Esmeril` `"1/4 CV"`, `Mini guincho` sem potência, `Elevador cremalheira` sem potência; todos com `qtd: 1`.
@@ -123,6 +134,18 @@ def test_canteiro_builder_defaults_mt_tensao_to_13_8(self) -> None:
 def test_canteiro_builder_keeps_extracted_mt_tensao(self) -> None:
     # {"mt": {"tensao_kv": 13.2}} → 13.2 (default não sobrescreve)
 
+def test_canteiro_builder_does_not_default_mt_eletroduto_or_cabo(self) -> None:
+    ctx = build_memorial_eletrico_canteiro_v1_context({"mt": {}})
+    for key in ("diametro_eletroduto_pol", "secao_cabo_mm2", "tipo_cabo",
+                "temperatura_cabo", "classe_isolacao"):
+        self.assertIsNone(ctx["mt"].get(key))
+
+def test_canteiro_builder_uses_engineer_description_for_torre(self) -> None:
+    ctx = build_memorial_eletrico_canteiro_v1_context(
+        {"quadros": [{"nome": "Q.D.L/T TORRE", "carga_w": 12714}]})
+    self.assertEqual(ctx["quadros"][0]["descricao"],
+        "Circuitos de iluminação e tomadas para uso durante a execução da obra.")
+
 def test_canteiro_builder_formats_quadro_load_and_known_description(self) -> None:
     ctx = build_memorial_eletrico_canteiro_v1_context({"quadros": [{"nome": "Q.G.B.T.", "carga_w": 89088}]})
     self.assertEqual(ctx["quadros"][0]["carga_formatada"], "89.088 W")
@@ -138,18 +161,18 @@ def test_canteiro_builder_unknown_quadro_gets_null_description(self) -> None:
 - [ ] **Step 4: Implementar o schema, a fixture, o loader, o validator e o builder**
 
 O builder:
-- aplica `setdefault` de `CANTEIRO_DEFAULTS` (tabela acima, mais `mt.tensao_kv = 13.8`), de `documento.data_atual` e das porcentagens (reusar `PORCENTAGEM_ENTRE_TRAFOS` e `PORCENTAGEM_ENTRE_QUADROS` do elétrico);
+- aplica `setdefault` de `CANTEIRO_DEFAULTS` (tabela "Valores fixos confirmados"; nada de eletroduto ou cabo de MT), de `documento.data_atual` e das porcentagens (reusar `PORCENTAGEM_ENTRE_TRAFOS` e `PORCENTAGEM_ENTRE_QUADROS` do elétrico);
 - quando `tem_subestacao` é false, aplica o mesmo `NULLABLE_ENERGIA_KEYS` do elétrico;
 - para cada quadro: `carga_formatada = f"{int(round(carga_w)):,} W".replace(",", ".")` e `descricao` buscada em `QUADRO_DESCRICOES_CONHECIDAS` pela chave normalizada (ASCII, maiúscula, sem pontos nem espaços).
 
-As chaves e os textos de `QUADRO_DESCRICOES_CONHECIDAS` vêm da seção 8 do exemplo:
+As chaves e os textos de `QUADRO_DESCRICOES_CONHECIDAS` vêm da seção 8 do exemplo; o texto da torre é o do engenheiro (decisão 9):
 - `QGBT`: "Concentra todos os demais quadros e equipamentos específicos de maior potência."
-- `QDLTTORRE`: "Iluminação e tomadas ao longo dos pavimentos, bem como alguns equipamentos móveis, como vibradores."
+- `QDLTTORRE`: "Circuitos de iluminação e tomadas para uso durante a execução da obra."
 - `QDAPOIO`: "Circuitos de luz, TUGs e TUEs de dormitórios, vestiários e refeitórios."
 - `QDSTAND`: "Circuitos de luz, TUGs e TUEs do stand de vendas e escritório."
 - `QDMOVEL`: "Equipamentos móveis, como guinchos e vibradores."
 
-O `notes.md` documenta as seções condicionais (só `energia.tem_subestacao`) e lista os defaults assumidos.
+O `notes.md` documenta as seções condicionais (`energia.tem_subestacao`, `mt.diametro_eletroduto_pol` e `mt.secao_cabo_mm2`) e lista os valores fixos confirmados.
 
 - [ ] **Step 5: Rodar até passar.** `python -m unittest tests.test_memorial_validator tests.test_context_builder` deve dar OK.
 
@@ -182,7 +205,8 @@ O `notes.md` documenta as seções condicionais (só `energia.tem_subestacao`) e
 - **Visão geral:** remover a frase condicional de grupo gerador.
 - **Subestação:** o título passa a "SUBESTAÇÃO AÉREA" e a seção "DADOS CONSTRUTIVOS DA SUBESTAÇÃO" sai inteira. O resto continua condicional a `energia.tem_subestacao`.
 - **Remover inteiras:** "INSTALAÇÃO DE LUZ ESSENCIAL (GRUPO GERADOR)", "ITENS NÃO INCLUSOS", "Ligações Equipotenciais" e o bloco do BEP, além de "PERFILADO", "SUPORTES PARA PERFILADOS", "ELETROCALHAS", "CONDULETES" e "TOMADAS DE FORÇA – ÁREA EXTERNA" nas especificações.
-- **Proteção contra choques:** trocar o parágrafo "Os condutores terra… BEP… SPDA" pelo texto novo da seção "Valores assumidos".
+- **Proteção contra choques:** trocar o parágrafo "Os condutores terra… BEP… SPDA" pelo texto novo aprovado (seção "Valores fixos confirmados").
+- **MT variável (decisão 6):** o parágrafo do eletroduto de MT fica dentro de `{%p if mt.diametro_eletroduto_pol %}…{%p endif %}`, e o do "Ramal de MT" (tipo, temperatura, classe e seção do cabo) dentro de `{%p if mt.secao_cabo_mm2 %}…{%p endif %}`. `tipo_cabo`, `temperatura_cabo` e `classe_isolacao` aparecem só quando preenchidos.
 - **Seções novas, com texto fixo do exemplo:** "6. NORMAS CONSIDERADAS NO PROJETO", com os dois parágrafos.
 - **Seção nova "7. EQUIPAMENTOS DO CANTEIRO DE OBRAS":** a frase "O canteiro na fase na qual se encontra, apresenta os seguintes equipamentos:" seguida de `{%p for e in equipamentos %}{{ e.nome }}{% if e.potencia %} {{ e.potencia }}{% endif %}: {{ "%02d"|format(e.qtd) }} unidade{% if e.qtd > 1 %}s{% endif %}{%p endfor %}`.
 - **Seção nova "8. QUADROS DE DISTRIBUIÇÃO NO CANTEIRO DE OBRAS":** a frase "Os quadros de distribuição previstos no canteiro de obras, conforme projeto, são os seguintes:" seguida de `{%p for q in quadros %}{{ q.nome }} – {{ q.carga_formatada }}{% if q.descricao %}: {{ q.descricao }}{% endif %}{%p endfor %}`.
@@ -210,6 +234,13 @@ def test_render_canteiro_equipment_without_potencia_has_no_placeholder_text(self
 def test_render_canteiro_without_subestacao_omits_section_and_renumbers(self) -> None:
     # tem_subestacao=False → sem "SUBESTAÇÃO AÉREA"; sumário contém "4.2. ATERRAMENTO"
     # e não contém "4.10."
+
+def test_render_canteiro_without_mt_cabo_omits_mt_paragraphs(self) -> None:
+    # fixture Bothanic (mt.* null) → texto não contém "8,7/15", "Ramal", "35mm²" nem "None"
+
+def test_render_canteiro_with_mt_cabo_renders_values(self) -> None:
+    # mt.secao_cabo_mm2=35, diametro_eletroduto_pol=4, classe_isolacao="8,7/15"
+    # → texto contém "35mm²" (ou o formato do elétrico) e "8,7/15"
 
 # tests/test_pipeline.py
 def test_generate_memorial_eletrico_canteiro_v1_writes_docx(self) -> None:
@@ -279,7 +310,7 @@ def test_generated_memorial_store_filename_for_eletrico_canteiro(self) -> None:
   - `map_extraction_to_partial_eletrico_canteiro_context(extraction_result: ProjectExtractionResult) -> MappingResult`
   - `assess_eletrico_canteiro_extraction_coverage(mapping: MappingResult) -> ExtractionReport`
   - `CANTEIRO_EXTRACTABLE_BY_MAPPER: list[str]` = `obra.construtora`, `obra.numero_cadastro`, `energia.tem_subestacao`, `energia.tipo_subestacao`, `energia.potencia_transformador_kva`, `aterramento.qtd_hastes`, `aterramento.secao_cabo_cobre_mm2`, `quadros`
-  - `CANTEIRO_PENDING_EXTRACTION: list[str]` = `obra.nome`, `obra.localizacao`, `equipamentos`, que ficam a cargo da LLM
+  - `CANTEIRO_PENDING_EXTRACTION: list[str]` = `obra.nome`, `obra.localizacao`, `equipamentos`, `mt.diametro_eletroduto_pol`, `mt.secao_cabo_mm2`. Ficam a cargo da LLM. Quando faltam, aparecem como não encontrados no `extraction_report`, sem bloquear a geração.
 
 **Regras e evidência.** As regex abaixo rodam sobre `_normalize_text(raw_text)`, com espaços colapsados. Foram conferidas em 16/11 no texto real: 12 ocorrências de quadros deduplicadas em 6 com as cargas exatas, `75` kVA, `3` hastes e cabo `50` mm². Sobre o texto cru, a regra do cabo não casa, por causa das quebras de linha.
 - **Reaproveitar** `_extract_construtora` e `_extract_numero_cadastro`. No texto do Bothanic eles já retornam `"MOREIRA & RUFFO'S LTDA"` e `"46/2024"`.
@@ -311,7 +342,10 @@ def test_canteiro_mapper_parses_brazilian_thousands_in_quadro_loads(self) -> Non
 def test_canteiro_mapper_does_not_infer_tipo_sistema_from_legend(self) -> None:
     self.assertNotIn("tipo_sistema", ctx.get("aterramento", {}))
 
-def test_canteiro_coverage_reports_equipamentos_as_pending(self) -> None: ...
+def test_canteiro_mapper_does_not_take_bt_feeder_as_mt_cable(self) -> None:
+    self.assertIsNone(ctx.get("mt", {}).get("secao_cabo_mm2"))
+
+def test_canteiro_coverage_reports_equipamentos_and_mt_cabo_as_pending(self) -> None: ...
 ```
 
 `bothanic_extraction()` monta um `ProjectExtractionResult` com `raw_text` igual ao conteúdo da fixture, usando o construtor já usado nos testes de mapper de gás.
@@ -342,6 +376,7 @@ def test_canteiro_coverage_reports_equipamentos_as_pending(self) -> None: ...
 - a subestação vem da indicação "SE AÉREA nnKVA";
 - quadros são os diagramas "Q.G.B.T." e "Q.D.*", com a carga total em W de cada um;
 - equipamentos são máquinas de obra rotuladas na planta (betoneira, policorte, bancada de serra, peneira, esmeril, guincho/mini guincho, elevador cremalheira, grua, vibrador, bombas). Usar a potência exatamente como rotulada (ex.: "7,5 CV") e contar uma unidade por símbolo na planta;
+- eletroduto e cabo de MT só quando rotulados explicitamente como MT (15 kV, 8,7/15 kV, ramal de entrada). **Nunca** usar cabos de BT 0,6/1 kV; quando não houver rótulo de MT, devolver null;
 - **nunca** extrair apartamentos, lojas, BEP ou gerador;
 - ignorar a legenda de símbolos.
 
@@ -409,7 +444,7 @@ def test_post_eletrico_canteiro_from_files_persist_creates_record(self) -> None:
 ### Task 7: Aceite com as plantas reais e regressão completa
 
 **Files:**
-- Create: `projects/canteiro/01_CANTEIRO OBRA BOTHANIC_V05.pdf` e `02_…` (mesmo critério de `projects/eletrico/`). Antes de comitar, confirmar com a TecPred que as plantas podem entrar no repositório.
+- Create: `projects/canteiro/01_CANTEIRO OBRA BOTHANIC_V05.pdf` e `02_…` (mesmo critério de `projects/eletrico/`). Autorizado em 17/11 (decisão 11).
 - Create: `scripts/acceptance_canteiro_bothanic.py`
 
 **Interfaces:**
@@ -418,13 +453,14 @@ def test_post_eletrico_canteiro_from_files_persist_creates_record(self) -> None:
 - [ ] **Step 1: Escrever o script de aceite.** Ele roda o pipeline real (OpenAI ligada, `OPENAI_MODEL` do ambiente) nos 2 PDFs e compara com a fixture esperada:
   - `obra.construtora`, `energia.potencia_transformador_kva`, `aterramento.qtd_hastes` e os 6 quadros com a carga exata;
   - cada equipamento esperado presente pelo nome (casamento sem diferenciar maiúsculas);
-  - `mt.tensao_kv == 13.8`.
+  - `mt.tensao_kv == 13.8`;
+  - `mt.secao_cabo_mm2` e `mt.diametro_eletroduto_pol` iguais a `None` (o Bothanic não traz MT).
 
   O script imprime as divergências campo a campo e sai com código diferente de zero se houver alguma.
 - [ ] **Step 2: Rodar.** `APP_ENV=local USE_LLM_EXTRACTION=true python scripts/acceptance_canteiro_bothanic.py`. O esperado é o DOCX gerado e zero divergências. Se houver divergência, ajustar o prompt (Task 5) ou o mapper (Task 4) com um teste novo que fixe o caso, e não o oráculo.
 - [ ] **Step 3: Regressão completa.** `python -m unittest discover -s tests` deve passar com todos os 411 testes anteriores e os novos.
 - [ ] **Step 4: Abrir o DOCX gerado no Word** e anexá-lo ao PR para o engenheiro validar texto e layout.
-- [ ] **Step 5: Commit e PR.** `git commit -m "test(canteiro): aceite com plantas Bothanic"`. No PR, listar a tabela "Valores assumidos" para o engenheiro confirmar.
+- [ ] **Step 5: Commit e PR.** `git commit -m "test(canteiro): aceite com plantas Bothanic"`. No PR, listar as decisões de 16/11 e 17/11 e pedir ao engenheiro que confira a seção de MT do DOCX do Bothanic (sem eletroduto e cabo de MT, SE aérea).
 
 ## Fora do escopo
 
